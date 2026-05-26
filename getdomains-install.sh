@@ -86,7 +86,7 @@ pkg_update() {
     elif [ "$pm" = 'opkg' ]; then
         opkg update
     else
-        die 'Neither apk nor opkg was found'
+        die 'Не найден ни apk, ни opkg'
     fi
 }
 
@@ -105,45 +105,45 @@ pkg_installed() {
 pkg_install() {
     package="$1"
     if pkg_installed "$package"; then
-        log "$package already installed"
+        log "$package уже установлен"
         return 0
     fi
 
     pm="$(pkg_manager)"
-    log "Installing $package"
+    log "Устанавливаю пакет: $package"
     if [ "$pm" = 'apk' ]; then
         apk add "$package"
     elif [ "$pm" = 'opkg' ]; then
         opkg install "$package"
     else
-        die 'Neither apk nor opkg was found'
+        die 'Не найден ни apk, ни opkg'
     fi
 }
 
 install_dnsmasq_full() {
     if pkg_installed dnsmasq-full; then
-        log 'dnsmasq-full already installed'
+        log 'dnsmasq-full уже установлен'
         return 0
     fi
 
     pm="$(pkg_manager)"
     if [ "$pm" = 'apk' ]; then
-        log 'Installing dnsmasq-full via apk'
-        apk add dnsmasq-full || die 'Failed to install dnsmasq-full'
+        log 'Устанавливаю dnsmasq-full через apk'
+        apk add dnsmasq-full || die 'Не удалось установить dnsmasq-full'
     else
-        log 'Installing dnsmasq-full via opkg'
-        opkg update || die 'opkg update failed'
-        cd /tmp || die 'Cannot enter /tmp'
+        log 'Устанавливаю dnsmasq-full через opkg'
+        opkg update || die 'opkg update завершился с ошибкой'
+        cd /tmp || die 'Не удалось перейти в /tmp'
         rm -f /tmp/dnsmasq-full*.ipk
-        opkg download dnsmasq-full || die 'Failed to download dnsmasq-full'
+        opkg download dnsmasq-full || die 'Не удалось скачать dnsmasq-full'
         opkg remove dnsmasq >/dev/null 2>&1 || true
-        opkg install /tmp/dnsmasq-full*.ipk || opkg install dnsmasq-full || die 'Failed to install dnsmasq-full'
+        opkg install /tmp/dnsmasq-full*.ipk || opkg install dnsmasq-full || die 'Не удалось установить dnsmasq-full'
         [ -f /etc/config/dhcp-opkg ] && cp /etc/config/dhcp /etc/config/dhcp-old && mv /etc/config/dhcp-opkg /etc/config/dhcp
     fi
 }
 
 check_system() {
-    [ -r /etc/os-release ] || die '/etc/os-release not found. This script is intended for OpenWrt.'
+    [ -r /etc/os-release ] || die '/etc/os-release не найден. Этот скрипт предназначен для OpenWrt.'
     . /etc/os-release
     version_id="${VERSION_ID:-0}"
     major="${version_id%%.*}"
@@ -151,16 +151,16 @@ check_system() {
 
     model='unknown'
     [ -r /tmp/sysinfo/model ] && model="$(cat /tmp/sysinfo/model)"
-    printf "$BLUE%s$NC\n" "Model: $model"
+    printf "$BLUE%s$NC\n" "Модель: $model"
     printf "$BLUE%s$NC\n" "OpenWrt: ${OPENWRT_RELEASE:-$version_id}"
 
     case "$major" in
         23|24|25) : ;;
-        *) die 'Supported releases are OpenWrt 23.05, 24.10 and 25.12. For your request the main target is 24/25.' ;;
+        *) die 'Поддерживаются OpenWrt 23.05, 24.10 и 25.12. Основная цель проекта — 24/25.' ;;
     esac
 
     if [ "$major" -lt 22 ]; then
-        die 'fw4/nftables mode requires OpenWrt 22.03 or newer.'
+        die 'Режим fw4/nftables требует OpenWrt 22.03 или новее.'
     fi
 }
 
@@ -215,14 +215,17 @@ LIST
 }
 
 select_domain_source() {
-    echo 'Choose remote domain list source:'
-    echo '1) Custom local lists only [recommended until you provide your own list]'
-    echo '2) Russia inside list from itdoginfo/allow-domains'
-    echo '3) Russia outside list from itdoginfo/allow-domains'
-    echo '4) Ukraine list from itdoginfo/allow-domains'
-    echo '5) My own raw dnsmasq/nftset URL'
-    echo '6) Disable remote list'
+    echo 'Выберите источник удалённого списка доменов:'
+    echo '1) Только локальные списки вручную [рекомендуется, пока нет своего списка]'
+    echo '2) Список Russia inside из itdoginfo/allow-domains'
+    echo '3) Список Russia outside из itdoginfo/allow-domains'
+    echo '4) Список Ukraine из itdoginfo/allow-domains'
+    echo '5) Свой raw URL со списком dnsmasq/nftset'
+    echo '6) Отключить удалённый список'
+    echo
+    echo 'Нажмите Enter для варианта 1.'
     while true; do
+        printf 'Ваш выбор [1]: '
         IFS= read -r choice || choice='1'
         case "$choice" in
             ''|1)
@@ -247,7 +250,7 @@ select_domain_source() {
                 ;;
             5)
                 USE_REMOTE_DOMAINS='1'
-                REMOTE_DOMAINS_URL="$(read_secret 'Enter raw URL with dnsmasq nftset rules:')"
+                REMOTE_DOMAINS_URL="$(read_secret 'Вставьте raw URL со списком dnsmasq/nftset:')"
                 break
                 ;;
             6)
@@ -255,7 +258,7 @@ select_domain_source() {
                 REMOTE_DOMAINS_URL=''
                 break
                 ;;
-            *) echo 'Choose 1-6' ;;
+            *) echo 'Введите число от 1 до 6.' ;;
         esac
     done
 }
@@ -423,13 +426,13 @@ install_awg_packages() {
 
     url='https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh'
     tmp='/tmp/amneziawg-install.sh'
-    log 'Installing AmneziaWG packages via Slava-Shchipunov/awg-openwrt installer'
+    log 'Устанавливаю пакеты AmneziaWG через установщик Slava-Shchipunov/awg-openwrt'
     if fetch_url "$url" "$tmp"; then
         chmod +x "$tmp"
         # -en: non-interactive package installation mode from upstream installer.
-        sh "$tmp" -en || warn 'AmneziaWG upstream installer returned an error. You may need to install AWG packages manually.'
+        sh "$tmp" -en || warn 'Upstream-установщик AmneziaWG вернул ошибку. Возможно, AWG-пакеты нужно установить вручную.'
     else
-        warn 'Failed to download AmneziaWG installer. Install AWG packages manually and run this script again.'
+        warn 'Не удалось скачать установщик AmneziaWG. Установите AWG-пакеты вручную и запустите скрипт ещё раз.'
     fi
 }
 
@@ -447,8 +450,8 @@ configure_wg_interface() {
         peer_section="wireguard_$iface"
     fi
 
-    private_key="$(read_secret 'Enter PrivateKey from [Interface]:')"
-    address="$(read_default 'Enter Address with subnet, for example 10.8.0.2/32 or 192.168.100.5/24' '10.8.0.2/32')"
+    private_key="$(read_secret 'Введите PrivateKey из секции [Interface]:')"
+    address="$(read_default 'Введите Address с маской, например 10.8.0.2/32 или 192.168.100.5/24' '10.8.0.2/32')"
 
     uci set network.$iface=interface
     uci set network.$iface.proto="$proto"
@@ -457,15 +460,15 @@ configure_wg_interface() {
     uci set network.$iface.listen_port='51820'
 
     if [ "$peer_type" = 'awg' ]; then
-        awg_jc="$(read_default 'Enter Jc' '3')"
-        awg_jmin="$(read_default 'Enter Jmin' '10')"
-        awg_jmax="$(read_default 'Enter Jmax' '50')"
-        awg_s1="$(read_secret 'Enter S1:')"
-        awg_s2="$(read_secret 'Enter S2:')"
-        awg_h1="$(read_secret 'Enter H1:')"
-        awg_h2="$(read_secret 'Enter H2:')"
-        awg_h3="$(read_secret 'Enter H3:')"
-        awg_h4="$(read_secret 'Enter H4:')"
+        awg_jc="$(read_default 'Введите Jc' '3')"
+        awg_jmin="$(read_default 'Введите Jmin' '10')"
+        awg_jmax="$(read_default 'Введите Jmax' '50')"
+        awg_s1="$(read_secret 'Введите S1:')"
+        awg_s2="$(read_secret 'Введите S2:')"
+        awg_h1="$(read_secret 'Введите H1:')"
+        awg_h2="$(read_secret 'Введите H2:')"
+        awg_h3="$(read_secret 'Введите H3:')"
+        awg_h4="$(read_secret 'Введите H4:')"
         uci set network.$iface.awg_jc="$awg_jc"
         uci set network.$iface.awg_jmin="$awg_jmin"
         uci set network.$iface.awg_jmax="$awg_jmax"
@@ -477,10 +480,10 @@ configure_wg_interface() {
         uci set network.$iface.awg_h4="$awg_h4"
     fi
 
-    public_key="$(read_secret 'Enter PublicKey from [Peer]:')"
-    preshared_key="$(read_secret 'Enter PresharedKey from [Peer] or leave empty:')"
-    endpoint_host="$(read_secret 'Enter Endpoint host without port:')"
-    endpoint_port="$(read_default 'Enter Endpoint port' '51820')"
+    public_key="$(read_secret 'Введите PublicKey из секции [Peer]:')"
+    preshared_key="$(read_secret 'Введите PresharedKey из секции [Peer] или оставьте пустым:')"
+    endpoint_host="$(read_secret 'Введите Endpoint host без порта:')"
+    endpoint_port="$(read_default 'Введите Endpoint port' '51820')"
 
     if ! uci show network 2>/dev/null | grep -q "=\'$peer_section\'"; then
         uci add network "$peer_section" >/dev/null
@@ -513,11 +516,11 @@ install_singbox_converter() {
     done
 
     if [ -n "$local_converter" ]; then
-        cp "$local_converter" "$CONVERTER_SCRIPT" || die 'Failed to install singbox-convert.sh'
+        cp "$local_converter" "$CONVERTER_SCRIPT" || die 'Не удалось установить singbox-convert.sh'
     else
-        warn "singbox-convert.sh was not found next to installer; trying to download from $PROJECT_RAW_BASE"
+        warn "singbox-convert.sh не найден рядом с установщиком; пробую скачать из $PROJECT_RAW_BASE"
         if ! fetch_url "$PROJECT_RAW_BASE/singbox-convert.sh" "$CONVERTER_SCRIPT"; then
-            die 'Failed to install singbox-convert.sh. Clone the full repository instead of running only getdomains-install.sh.'
+            die 'Не удалось установить singbox-convert.sh. Скачайте полный репозиторий, а не только getdomains-install.sh.'
         fi
     fi
     chmod +x "$CONVERTER_SCRIPT"
@@ -558,7 +561,7 @@ create_singbox_placeholder() {
   }
 }
 EOF_SB
-        warn 'Created /etc/sing-box/config.json template. Edit outbound settings before using sing-box.'
+        warn 'Создан шаблон /etc/sing-box/config.json. Перед использованием sing-box настройте outbound.'
     fi
 }
 
@@ -570,42 +573,45 @@ configure_singbox_template() {
     [ -f /etc/config/sing-box ] && uci -q set sing-box.main.enabled='1' && uci -q set sing-box.main.user='root' && uci -q commit sing-box
     install_singbox_converter
 
-    echo 'Sing-box outbound setup:'
-    echo '1) Paste one client link now: vless://, vmess://, trojan:// or ss:// [recommended for 3X-UI]'
-    echo '2) Enter a subscription URL from 3X-UI or another panel'
-    echo '3) Convert a local file already uploaded to the router: link/subscription/full config.json/outbound.json'
-    echo '4) Use existing /etc/sing-box/config.json without changes'
-    echo '5) Create placeholder template only'
+    echo 'Настройка исходящего подключения Sing-box:'
+    echo '1) Вставить одну клиентскую ссылку сейчас: vless://, vmess://, trojan:// или ss:// [рекомендуется для 3X-UI]'
+    echo '2) Вставить URL подписки из 3X-UI или другой панели'
+    echo '3) Конвертировать локальный файл на роутере: ссылка/подписка/full config.json/outbound.json'
+    echo '4) Использовать существующий /etc/sing-box/config.json без изменений'
+    echo '5) Создать только шаблон /etc/sing-box/config.json'
+    echo
+    echo 'Нажмите Enter для варианта 1.'
 
     while true; do
+        printf 'Ваш выбор [1]: '
         IFS= read -r sb_choice || sb_choice='1'
         case "$sb_choice" in
             ''|1)
-                link="$(read_secret 'Paste proxy link:')"
+                link="$(read_secret 'Вставьте proxy-ссылку:')"
                 if [ -n "$link" ]; then
-                    "$CONVERTER_SCRIPT" --link "$link" || warn 'Sing-box conversion failed. Existing config was kept.'
+                    "$CONVERTER_SCRIPT" --link "$link" || warn 'Конвертация Sing-box не удалась. Старый конфиг сохранён.'
                 else
-                    warn 'Empty link; creating placeholder template.'
+                    warn 'Ссылка пустая; создаю шаблон.'
                     create_singbox_placeholder
                 fi
                 break
                 ;;
             2)
-                sub_url="$(read_secret 'Enter subscription URL:')"
+                sub_url="$(read_secret 'Вставьте URL подписки:')"
                 if [ -n "$sub_url" ]; then
-                    "$CONVERTER_SCRIPT" --url "$sub_url" || warn 'Subscription conversion failed. Existing config was kept.'
+                    "$CONVERTER_SCRIPT" --url "$sub_url" || warn 'Конвертация подписки не удалась. Старый конфиг сохранён.'
                 else
-                    warn 'Empty URL; creating placeholder template.'
+                    warn 'URL пустой; создаю шаблон.'
                     create_singbox_placeholder
                 fi
                 break
                 ;;
             3)
-                input_path="$(read_default 'Enter local file path' '/tmp/proxy.txt')"
+                input_path="$(read_default 'Введите путь к локальному файлу' '/tmp/proxy.txt')"
                 if [ -f "$input_path" ]; then
-                    "$CONVERTER_SCRIPT" --input "$input_path" || warn 'Local file conversion failed. Existing config was kept.'
+                    "$CONVERTER_SCRIPT" --input "$input_path" || warn 'Конвертация локального файла не удалась. Старый конфиг сохранён.'
                 else
-                    warn "File not found: $input_path"
+                    warn "Файл не найден: $input_path"
                     create_singbox_placeholder
                 fi
                 break
@@ -613,11 +619,11 @@ configure_singbox_template() {
             4)
                 if [ -f /etc/sing-box/config.json ]; then
                     if command -v sing-box >/dev/null 2>&1; then
-                        sing-box check -c /etc/sing-box/config.json || warn 'Existing sing-box config did not pass sing-box check.'
+                        sing-box check -c /etc/sing-box/config.json || warn 'Существующий конфиг Sing-box не прошёл проверку sing-box check.'
                     fi
-                    log 'Keeping existing /etc/sing-box/config.json'
+                    log 'Оставляю существующий /etc/sing-box/config.json'
                 else
-                    warn 'Existing config not found; creating placeholder template.'
+                    warn 'Существующий конфиг не найден; создаю шаблон.'
                     create_singbox_placeholder
                 fi
                 break
@@ -626,7 +632,7 @@ configure_singbox_template() {
                 create_singbox_placeholder
                 break
                 ;;
-            *) echo 'Choose 1-5' ;;
+            *) echo 'Введите число от 1 до 5.' ;;
         esac
     done
 
@@ -635,15 +641,18 @@ configure_singbox_template() {
 }
 
 select_tunnel() {
-    echo 'Select tunnel/interface for marked traffic:'
-    echo '1) Configure WireGuard as wg0'
-    echo '2) Configure AmneziaWG as awg0'
-    echo '3) Use OpenVPN/tun0 (manual OpenVPN config)'
-    echo '4) Use Sing-box/tun0 (template will be created)'
-    echo '5) Use tun2socks/tun0 (manual config)'
-    echo '6) Skip tunnel setup, only install routing/lists'
+    echo 'Выберите туннель/интерфейс для промаркированного трафика:'
+    echo '1) Настроить обычный WireGuard как wg0'
+    echo '2) Настроить AmneziaWG как awg0'
+    echo '3) Использовать OpenVPN/tun0 (конфиг OpenVPN настраивается вручную)'
+    echo '4) Использовать Sing-box/tun0 (можно вставить ссылку/подписку/JSON)'
+    echo '5) Использовать tun2socks/tun0 (настраивается вручную)'
+    echo '6) Пропустить настройку туннеля, установить только маршрутизацию и списки'
+    echo
+    echo 'Нажмите Enter для варианта 6.'
 
     while true; do
+        printf 'Ваш выбор [6]: '
         IFS= read -r choice || choice='6'
         case "$choice" in
             1)
@@ -689,7 +698,7 @@ select_tunnel() {
                 TUNNEL='0'
                 break
                 ;;
-            *) echo 'Choose 1-6' ;;
+            *) echo 'Введите число от 1 до 6.' ;;
         esac
     done
     uci commit firewall >/dev/null 2>&1 || true
@@ -989,8 +998,8 @@ install_base_packages() {
 
 main() {
     check_system
-    warn 'Backup your OpenWrt configuration before continuing. This script changes firewall, network and dnsmasq settings.'
-    echo 'Press Enter to continue or Ctrl+C to abort.'
+    warn 'Перед продолжением сделайте резервную копию настроек OpenWrt. Скрипт изменяет firewall, network и dnsmasq.'
+    echo 'Нажмите Enter для продолжения или Ctrl+C для отмены.'
     IFS= read -r _continue || true
 
     ensure_directories
@@ -1007,16 +1016,16 @@ main() {
     write_init_script
     ensure_cron
 
-    log 'Starting getdomains update'
+    log 'Запускаю обновление getdomains'
     "$INIT_SCRIPT" start || true
 
-    log 'Restarting network'
+    log 'Перезапускаю network'
     /etc/init.d/network restart >/dev/null 2>&1 || true
 
-    log 'Done'
-    echo "Edit domains in: $DOMAINS_DIR"
-    echo "Edit IP/CIDR lists in: $IPS_DIR"
-    echo "After edits run: /etc/init.d/getdomains start"
+    log 'Готово'
+    echo "Домены можно менять здесь: $DOMAINS_DIR"
+    echo "IP/CIDR списки можно менять здесь: $IPS_DIR"
+    echo "После изменений запустите: /etc/init.d/getdomains start"
 }
 
 main "$@"

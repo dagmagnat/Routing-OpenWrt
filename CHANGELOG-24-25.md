@@ -62,3 +62,10 @@
 - Added `install.sh`: a bootstrap installer that updates router dependencies first, then downloads and runs the project from `dagmagnat/Routing-OpenWrt`.
 - Updated README install commands so users install from your GitHub, while the original project remains only as attribution.
 - Updated Ansible metadata to point issue tracking to `dagmagnat/Routing-OpenWrt`.
+
+## v5 - Russian installer menus
+
+- Translated the interactive installer menus and prompts into Russian.
+- Added explicit input prompts such as `Ваш выбор [1]:` and `Ваш выбор [6]:` so users see where to type the menu number.
+- Translated bootstrap installer messages in `install.sh`.
+- Translated the most common Sing-box converter messages.

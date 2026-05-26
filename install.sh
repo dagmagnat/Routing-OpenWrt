@@ -46,50 +46,50 @@ pkg_update_and_deps() {
     pm="$(pkg_manager)"
     case "$pm" in
         apk)
-            log 'Updating apk indexes'
-            apk update || die 'apk update failed'
-            log 'Installing bootstrap dependencies'
-            apk add curl ca-bundle tar gzip jq || die 'Failed to install bootstrap dependencies via apk'
+            log 'Обновляю индексы apk'
+            apk update || die 'apk update завершился с ошибкой'
+            log 'Устанавливаю базовые зависимости'
+            apk add curl ca-bundle tar gzip jq || die 'Не удалось установить базовые зависимости через apk'
             ;;
         opkg)
-            log 'Updating opkg indexes'
-            opkg update || die 'opkg update failed'
-            log 'Installing bootstrap dependencies'
-            opkg install curl ca-bundle tar gzip jq || die 'Failed to install bootstrap dependencies via opkg'
+            log 'Обновляю индексы opkg'
+            opkg update || die 'opkg update завершился с ошибкой'
+            log 'Устанавливаю базовые зависимости'
+            opkg install curl ca-bundle tar gzip jq || die 'Не удалось установить базовые зависимости через opkg'
             ;;
         *)
-            die 'Neither apk nor opkg was found. This installer is intended for OpenWrt.'
+            die 'Не найден ни apk, ни opkg. Этот установщик предназначен для OpenWrt.'
             ;;
     esac
 }
 
 run_local_or_downloaded_installer() {
     if [ -f ./getdomains-install.sh ]; then
-        log 'Running local getdomains-install.sh'
+        log 'Запускаю локальный getdomains-install.sh'
         sh ./getdomains-install.sh
         return $?
     fi
 
-    mkdir -p "$WORK_DIR" || die "Cannot create $WORK_DIR"
-    cd "$WORK_DIR" || die "Cannot enter $WORK_DIR"
+    mkdir -p "$WORK_DIR" || die "Не удалось создать $WORK_DIR"
+    cd "$WORK_DIR" || die "Не удалось перейти в $WORK_DIR"
     rm -rf "$PROJECT_DIR" "/tmp/$REPO_NAME-main" "/tmp/$REPO_NAME-$REPO_BRANCH" "$WORK_DIR/$REPO_NAME.tar.gz"
 
-    log "Downloading $REPO_OWNER/$REPO_NAME from GitHub"
-    fetch_url "$ARCHIVE_URL" "$WORK_DIR/$REPO_NAME.tar.gz" || die "Failed to download $ARCHIVE_URL"
+    log "Скачиваю $REPO_OWNER/$REPO_NAME с GitHub"
+    fetch_url "$ARCHIVE_URL" "$WORK_DIR/$REPO_NAME.tar.gz" || die "Не удалось скачать $ARCHIVE_URL"
 
-    log 'Extracting project archive'
-    tar -xzf "$WORK_DIR/$REPO_NAME.tar.gz" || die 'Failed to extract project archive'
+    log 'Распаковываю архив проекта'
+    tar -xzf "$WORK_DIR/$REPO_NAME.tar.gz" || die 'Не удалось распаковать архив проекта'
 
     [ -d "$PROJECT_DIR" ] || PROJECT_DIR="$(find "$WORK_DIR" -maxdepth 1 -type d -name "$REPO_NAME-*" | head -n 1)"
-    [ -n "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/getdomains-install.sh" ] || die 'getdomains-install.sh was not found in downloaded project'
+    [ -n "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/getdomains-install.sh" ] || die 'В скачанном проекте не найден getdomains-install.sh'
 
-    cd "$PROJECT_DIR" || die "Cannot enter $PROJECT_DIR"
-    log 'Running getdomains-install.sh'
+    cd "$PROJECT_DIR" || die "Не удалось перейти в $PROJECT_DIR"
+    log 'Запускаю getdomains-install.sh'
     sh ./getdomains-install.sh
 }
 
 main() {
-    [ -r /etc/os-release ] || die '/etc/os-release not found. This script is intended for OpenWrt.'
+    [ -r /etc/os-release ] || die '/etc/os-release не найден. Этот скрипт предназначен для OpenWrt.'
     pkg_update_and_deps
     run_local_or_downloaded_installer
 }

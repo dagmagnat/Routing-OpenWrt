@@ -21,7 +21,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
 need_jq() {
-    cmd_exists jq || die 'jq is required for conversion. Install it first: opkg update && opkg install jq, or apk update && apk add jq'
+    cmd_exists jq || die 'Для конвертации нужен jq. Установите его: opkg update && opkg install jq или apk update && apk add jq'
 }
 
 fetch_url() {
@@ -32,7 +32,7 @@ fetch_url() {
     elif cmd_exists wget; then
         wget -4 -q -T 60 -O "$out" "$url"
     else
-        die 'curl or wget is required to download subscription URLs'
+        die 'Для скачивания URL подписки нужен curl или wget'
     fi
 }
 
@@ -72,7 +72,7 @@ b64_decode_str() {
     elif cmd_exists openssl; then
         printf '%s' "$normalized" | openssl enc -base64 -d -A 2>/dev/null
     else
-        die 'base64 decoder is required'
+        die 'Для работы нужен base64 decoder'
     fi
 }
 
@@ -160,9 +160,9 @@ make_vless_outbound() {
     need_jq
     parse_uri_parts "$link"
     uuid="$(url_decode "$USERINFO")"
-    [ -n "$uuid" ] || die 'VLESS UUID is empty'
-    [ -n "$SERVER" ] || die 'VLESS server is empty'
-    valid_port "$PORT" || die "VLESS port is invalid: $PORT"
+    [ -n "$uuid" ] || die 'VLESS UUID пустой'
+    [ -n "$SERVER" ] || die 'VLESS server пустой'
+    valid_port "$PORT" || die "Некорректный порт VLESS: $PORT"
 
     tr_type="$(qparam type)"; [ -n "$tr_type" ] || tr_type='tcp'
     security="$(qparam security)"; [ -n "$security" ] || security='none'
@@ -201,9 +201,9 @@ make_trojan_outbound() {
     need_jq
     parse_uri_parts "$link"
     password="$(url_decode "$USERINFO")"
-    [ -n "$password" ] || die 'Trojan password is empty'
-    [ -n "$SERVER" ] || die 'Trojan server is empty'
-    valid_port "$PORT" || die "Trojan port is invalid: $PORT"
+    [ -n "$password" ] || die 'Trojan password пустой'
+    [ -n "$SERVER" ] || die 'Trojan server пустой'
+    valid_port "$PORT" || die "Некорректный порт Trojan: $PORT"
 
     tr_type="$(qparam type)"; [ -n "$tr_type" ] || tr_type='tcp'
     security="$(qparam security)"; [ -n "$security" ] || security='tls'
@@ -239,7 +239,7 @@ make_shadowsocks_outbound() {
     if [ -z "$userinfo" ]; then
         # Old form: ss://base64(method:password@host:port)
         decoded="$(b64_decode_str "$hostport_main" 2>/dev/null || true)"
-        [ -n "$decoded" ] || die 'Cannot decode Shadowsocks link'
+        [ -n "$decoded" ] || die 'Не удалось декодировать Shadowsocks-ссылку'
         userinfo="${decoded%@*}"
         hp="${decoded#*@}"
         SERVER="${hp%:*}"
@@ -255,10 +255,10 @@ make_shadowsocks_outbound() {
 
     method="${userinfo%%:*}"
     password="${userinfo#*:}"
-    [ -n "$method" ] || die 'Shadowsocks method is empty'
-    [ -n "$password" ] || die 'Shadowsocks password is empty'
-    [ -n "$SERVER" ] || die 'Shadowsocks server is empty'
-    valid_port "$PORT" || die "Shadowsocks port is invalid: $PORT"
+    [ -n "$method" ] || die 'Shadowsocks method пустой'
+    [ -n "$password" ] || die 'Shadowsocks password пустой'
+    [ -n "$SERVER" ] || die 'Shadowsocks server пустой'
+    valid_port "$PORT" || die "Некорректный порт Shadowsocks: $PORT"
 
     jq -n --arg tag "$PROXY_TAG" --arg server "$SERVER" --arg port "$PORT" \
       --arg method "$method" --arg password "$password" \
@@ -269,8 +269,8 @@ make_vmess_outbound() {
     link="$1"
     need_jq
     payload="${link#vmess://}"
-    decoded="$(b64_decode_str "$payload")" || die 'Cannot decode VMess link'
-    printf '%s' "$decoded" | jq -e . >/dev/null || die 'VMess payload is not valid JSON'
+    decoded="$(b64_decode_str "$payload")" || die 'Не удалось декодировать VMess-ссылку'
+    printf '%s' "$decoded" | jq -e . >/dev/null || die 'VMess payload не является корректным JSON'
 
     server="$(printf '%s' "$decoded" | jq -r '.add // .server // empty')"
     port="$(printf '%s' "$decoded" | jq -r '(.port // .server_port // empty)|tostring')"
@@ -285,9 +285,9 @@ make_vmess_outbound() {
     host="$(printf '%s' "$decoded" | jq -r '.host // empty')"
     service_name="$(printf '%s' "$decoded" | jq -r '.serviceName // .service_name // empty')"
 
-    [ -n "$server" ] || die 'VMess server is empty'
-    valid_port "$port" || die "VMess port is invalid: $port"
-    [ -n "$uuid" ] || die 'VMess UUID is empty'
+    [ -n "$server" ] || die 'VMess server пустой'
+    valid_port "$port" || die "Некорректный порт VMess: $port"
+    [ -n "$uuid" ] || die 'VMess UUID пустой'
 
     jq -n \
       --arg tag "$PROXY_TAG" --arg server "$server" --arg port "$port" --arg uuid "$uuid" \
@@ -364,11 +364,11 @@ install_config() {
             cp "$OUTPUT_CONFIG" "$OUTPUT_CONFIG.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
         fi
         mv "$tmp" "$OUTPUT_CONFIG"
-        log "Installed sing-box config: $OUTPUT_CONFIG"
+        log "Установлен конфиг sing-box: $OUTPUT_CONFIG"
         return 0
     fi
     rm -f "$tmp"
-    die 'Generated sing-box config is invalid; previous config was kept'
+    die 'Сгенерированный конфиг sing-box некорректен; предыдущий конфиг сохранён'
 }
 
 convert_link_to_config() {
@@ -378,14 +378,14 @@ convert_link_to_config() {
     config_tmp="$SOURCE_DIR/config.tmp.$$"
 
     case "$link" in
-        vless://*) make_vless_outbound "$link" > "$outbound_tmp" || die "failed to convert VLESS link" ;;
-        vmess://*) make_vmess_outbound "$link" > "$outbound_tmp" || die "failed to convert VMess link" ;;
-        trojan://*) make_trojan_outbound "$link" > "$outbound_tmp" || die "failed to convert Trojan link" ;;
-        ss://*) make_shadowsocks_outbound "$link" > "$outbound_tmp" || die "failed to convert Shadowsocks link" ;;
-        *) die 'Unsupported link scheme. Supported: vless://, vmess://, trojan://, ss://' ;;
+        vless://*) make_vless_outbound "$link" > "$outbound_tmp" || die "Не удалось конвертировать VLESS-ссылку" ;;
+        vmess://*) make_vmess_outbound "$link" > "$outbound_tmp" || die "Не удалось конвертировать VMess-ссылку" ;;
+        trojan://*) make_trojan_outbound "$link" > "$outbound_tmp" || die "Не удалось конвертировать Trojan-ссылку" ;;
+        ss://*) make_shadowsocks_outbound "$link" > "$outbound_tmp" || die "Не удалось конвертировать Shadowsocks-ссылку" ;;
+        *) die 'Неподдерживаемый тип ссылки. Поддерживаются: vless://, vmess://, trojan://, ss://' ;;
     esac
 
-    jq -e '.tag = "'"$PROXY_TAG"'"' "$outbound_tmp" > "$outbound_tmp.normalized" && mv "$outbound_tmp.normalized" "$outbound_tmp" || die "generated outbound JSON is invalid"
+    jq -e '.tag = "'"$PROXY_TAG"'"' "$outbound_tmp" > "$outbound_tmp.normalized" && mv "$outbound_tmp.normalized" "$outbound_tmp" || die "Сгенерированный outbound JSON некорректен"
     cp "$outbound_tmp" "$SOURCE_DIR/outbound.json"
     wrap_outbound_config "$outbound_tmp" "$config_tmp"
     install_config "$config_tmp"
@@ -407,7 +407,7 @@ first_link_from_file() {
 convert_json_file() {
     file="$1"
     need_jq
-    jq -e . "$file" >/dev/null || die 'JSON file is invalid'
+    jq -e . "$file" >/dev/null || die 'JSON-файл некорректен'
     mkdir -p "$SOURCE_DIR"
 
     if jq -e 'has("inbounds") and has("outbounds")' "$file" >/dev/null; then
@@ -426,12 +426,12 @@ convert_json_file() {
         return 0
     fi
 
-    die 'JSON is valid, but it is neither a full sing-box config nor a single outbound object'
+    die 'JSON корректный, но это не полный sing-box config и не одиночный outbound object'
 }
 
 convert_input_file() {
     file="$1"
-    [ -s "$file" ] || die "input file is empty or missing: $file"
+    [ -s "$file" ] || die "Входной файл пустой или не найден: $file"
     first_char="$(sed -n 's/^[[:space:]]*\(.\).*$/\1/p' "$file" | head -n 1)"
     if [ "$first_char" = '{' ]; then
         convert_json_file "$file"
@@ -439,7 +439,7 @@ convert_input_file() {
     fi
 
     link="$(first_link_from_file "$file" || true)"
-    [ -n "$link" ] || die 'No supported proxy link found in file/subscription'
+    [ -n "$link" ] || die 'В файле/подписке не найдена поддерживаемая proxy-ссылка'
     printf '%s\n' "$link" > "$SOURCE_DIR/proxy.url"
     convert_link_to_config "$link"
 }
@@ -467,12 +467,12 @@ main() {
     mkdir -p "$SOURCE_DIR"
     case "${1:-}" in
         --link)
-            [ $# -ge 2 ] || die '--link requires an argument'
+            [ $# -ge 2 ] || die '--link требует аргумент'
             printf '%s\n' "$2" > "$SOURCE_DIR/proxy.url"
             convert_link_to_config "$2"
             ;;
         --url|--subscription)
-            [ $# -ge 2 ] || die '--url requires an argument'
+            [ $# -ge 2 ] || die '--url требует аргумент'
             printf '%s\n' "$2" > "$SOURCE_DIR/subscription.url"
             tmp="$SOURCE_DIR/subscription.downloaded.$$"
             fetch_url "$2" "$tmp"
@@ -480,18 +480,18 @@ main() {
             rm -f "$tmp"
             ;;
         --input)
-            [ $# -ge 2 ] || die '--input requires a file path'
+            [ $# -ge 2 ] || die '--input требует путь к файлу'
             convert_input_file "$2"
             ;;
         --json)
-            [ $# -ge 2 ] || die '--json requires a file path'
+            [ $# -ge 2 ] || die '--json требует путь к файлу'
             convert_json_file "$2"
             ;;
         --help|-h|'')
             usage
             ;;
         *)
-            die "unknown option: $1"
+            die "Неизвестная опция: $1"
             ;;
     esac
 }
