@@ -38,11 +38,13 @@ log 'Removing init script, cron entry and generated dnsmasq config'
 rm -f /etc/init.d/getdomains /etc/hotplug.d/iface/30-vpnroute /etc/hotplug.d/net/30-vpnroute "$DNSMASQ_FILE"
 sed -i '/\/etc\/init.d\/getdomains start/d' /etc/crontabs/root 2>/dev/null || true
 
-log 'Removing firewall ipsets/rules created by domain-routing'
+log 'Removing firewall ipsets/rules/redirects created by domain-routing'
 delete_by_name firewall rule mark_domains
 delete_by_name firewall rule mark_ip
 delete_by_name firewall ipset vpn_domains
 delete_by_name firewall ipset vpn_ip
+delete_by_name firewall redirect domainrouting_force_dns_udp
+delete_by_name firewall redirect domainrouting_force_dns_tcp
 uci commit firewall >/dev/null 2>&1 || true
 
 log 'Removing network policy rule mark0x1'

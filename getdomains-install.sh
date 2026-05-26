@@ -293,6 +293,12 @@ REMOTE_DOMAINS_URL="$REMOTE_DOMAINS_URL"
 # Optional remote IPv4/CIDR raw lists, separated by spaces.
 # Example: REMOTE_IP_URLS="https://example.com/telegram.lst https://example.com/whatsapp.lst"
 REMOTE_IP_URLS=""
+
+# Reliability options for domain-based routing.
+# DNS interception is important because dnsmasq.nftset only works when clients resolve names through this router.
+FORCE_LAN_DNS="${FORCE_LAN_DNS:-1}"
+# Most AWG/WG/OpenVPN client configs in this project are IPv4-only. IPv6 can bypass domain routing.
+DISABLE_LAN_IPV6="${DISABLE_LAN_IPV6:-1}"
 EOF_CFG
 }
 
@@ -420,6 +426,84 @@ ensure_dnsmasq_confdir() {
     fi
 }
 
+ensure_lan_dns_default() {
+    # DHCP option 6: выдаём клиентам IP роутера как DNS, но не удаляем пользовательские DHCP options.
+    # На стандартном OpenWrt это обычно уже так, но явная опция полезна на кастомных сборках.
+    lan_ip="$(uci -q get network.lan.ipaddr 2>/dev/null || echo '192.168.1.1')"
+    if ! uci -q show dhcp.lan 2>/dev/null | grep -Fq "dhcp_option='6,$lan_ip'"; then
+        uci add_list dhcp.lan.dhcp_option="6,$lan_ip"
+        uci commit dhcp
+    fi
+}
+
+ensure_force_lan_dns() {
+    # Перехватываем обычный DNS/53 с LAN на локальный dnsmasq.
+    # DoH/DoT это не ломает и не перехватывает, но обычные hardcoded DNS 8.8.8.8/1.1.1.1 закрывает.
+    [ "${FORCE_LAN_DNS:-1}" = '1' ] || return 0
+    lan_ip="$(uci -q get network.lan.ipaddr 2>/dev/null || echo '192.168.1.1')"
+
+    for proto in udp tcp; do
+        name="domainrouting_force_dns_$proto"
+        sec="$(find_uci_section firewall redirect "$name")"
+        if [ -z "$sec" ]; then
+            uci add firewall redirect >/dev/null
+            sec='@redirect[-1]'
+            uci set firewall.$sec.name="$name"
+        fi
+        uci set firewall.$sec.src='lan'
+        uci set firewall.$sec.proto="$proto"
+        uci set firewall.$sec.src_dport='53'
+        uci set firewall.$sec.dest_ip="$lan_ip"
+        uci set firewall.$sec.dest_port='53'
+        uci set firewall.$sec.target='DNAT'
+        uci set firewall.$sec.family='ipv4'
+        uci set firewall.$sec.reflection='0'
+    done
+    uci commit firewall
+}
+
+ensure_ipv6_mode() {
+    [ "${DISABLE_LAN_IPV6:-1}" = '1' ] || return 0
+    warn 'Включён IPv4-only режим для LAN: отключаю RA/DHCPv6/NDP, чтобы IPv6 не обходил доменную маршрутизацию.'
+    uci set dhcp.lan.ra='disabled'
+    uci set dhcp.lan.dhcpv6='disabled'
+    uci set dhcp.lan.ndp='disabled'
+    uci set network.lan.delegate='0'
+    uci commit dhcp
+    uci commit network
+}
+
+select_safety_options() {
+    echo 'Дополнительные параметры надёжности:'
+    echo '1) Включить перехват DNS на роутер и отключить IPv6 на LAN [рекомендуется для AWG/WG/OpenVPN IPv4]'
+    echo '2) Только перехват DNS на роутер, IPv6 не трогать'
+    echo '3) Ничего не менять'
+    echo
+    echo 'Нажмите Enter для варианта 1.'
+    while true; do
+        printf 'Ваш выбор [1]: '
+        IFS= read -r safety_choice || safety_choice='1'
+        case "$safety_choice" in
+            ''|1)
+                FORCE_LAN_DNS='1'
+                DISABLE_LAN_IPV6='1'
+                break
+                ;;
+            2)
+                FORCE_LAN_DNS='1'
+                DISABLE_LAN_IPV6='0'
+                break
+                ;;
+            3)
+                FORCE_LAN_DNS='0'
+                DISABLE_LAN_IPV6='0'
+                break
+                ;;
+            *) echo 'Введите число от 1 до 3.' ;;
+        esac
+    done
+}
+
 install_wireguard() {
     pkg_install wireguard-tools
 }
@@ -494,6 +578,274 @@ install_awg_packages() {
     die 'AmneziaWG не установлен. Установите kmod-amneziawg и amneziawg-tools, затем запустите скрипт повторно.'
 }
 
+set_network_opt() {
+    section="$1"
+    option="$2"
+    value="$3"
+    if [ -n "$value" ]; then
+        uci set network.$section.$option="$value"
+    else
+        uci -q delete network.$section.$option >/dev/null 2>&1 || true
+    fi
+}
+
+trim_string() {
+    printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+normalize_list_value() {
+    printf '%s' "$1" | sed 's/,/ /g;s/[[:space:]][[:space:]]*/ /g;s/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+read_multiline_config() {
+    out_file="$1"
+    : > "$out_file" || die "Не удалось создать временный файл $out_file"
+    echo 'Вставьте полный конфиг AmneziaWG/WireGuard начиная с [Interface].'
+    echo 'После вставки напишите отдельной строкой END и нажмите Enter.'
+    echo 'Пример окончания:'
+    echo 'END'
+    while IFS= read -r line; do
+        [ "$line" = 'END' ] && break
+        printf '%s\n' "$line" >> "$out_file"
+    done
+    [ -s "$out_file" ] || die 'Конфиг пустой, настройка прервана.'
+}
+
+parse_endpoint_value() {
+    endpoint="$1"
+    endpoint_host=''
+    endpoint_port=''
+    case "$endpoint" in
+        \[*\]:*)
+            endpoint_host="$(printf '%s' "$endpoint" | sed 's/^\[\(.*\)\]:\([0-9][0-9]*\)$/\1/')"
+            endpoint_port="$(printf '%s' "$endpoint" | sed 's/^\[\(.*\)\]:\([0-9][0-9]*\)$/\2/')"
+            ;;
+        *:*)
+            endpoint_host="${endpoint%:*}"
+            endpoint_port="${endpoint##*:}"
+            ;;
+        *)
+            endpoint_host="$endpoint"
+            endpoint_port=''
+            ;;
+    esac
+}
+
+reset_peer_sections() {
+    peer_section="$1"
+    while uci -q delete network.@$peer_section[0] >/dev/null 2>&1; do
+        :
+    done
+}
+
+apply_wg_config_file() {
+    config_file="$1"
+    iface="$2"
+    peer_type="$3"
+    proto="$4"
+    peer_section="$5"
+
+    section=''
+    private_key=''
+    address=''
+    dns=''
+    listen_port='51820'
+    awg_jc=''
+    awg_jmin=''
+    awg_jmax=''
+    awg_s1=''
+    awg_s2=''
+    awg_s3=''
+    awg_s4=''
+    awg_h1=''
+    awg_h2=''
+    awg_h3=''
+    awg_h4=''
+    awg_i1=''
+    awg_i2=''
+    awg_i3=''
+    awg_i4=''
+    awg_i5=''
+    public_key=''
+    preshared_key=''
+    endpoint=''
+    allowed_ips='0.0.0.0/0'
+    persistent_keepalive='25'
+
+    while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+        line="$(printf '%s' "$raw_line" | tr -d '\r')"
+        trimmed="$(trim_string "$line")"
+        [ -z "$trimmed" ] && continue
+        case "$trimmed" in
+            \#*|\;*) continue ;;
+            \[*\])
+                section="$(printf '%s' "$trimmed" | sed 's/^\[//;s/\]$//' | tr '[:upper:]' '[:lower:]')"
+                continue
+                ;;
+        esac
+        case "$trimmed" in
+            *=*) ;;
+            *) continue ;;
+        esac
+        key="$(trim_string "${trimmed%%=*}" | tr '[:upper:]' '[:lower:]')"
+        value="$(trim_string "${trimmed#*=}")"
+        [ -z "$value" ] && continue
+
+        case "$section:$key" in
+            interface:privatekey) private_key="$value" ;;
+            interface:address) address="$(normalize_list_value "$value")" ;;
+            interface:dns) dns="$(normalize_list_value "$value")" ;;
+            interface:listenport) listen_port="$value" ;;
+            interface:jc) awg_jc="$value" ;;
+            interface:jmin) awg_jmin="$value" ;;
+            interface:jmax) awg_jmax="$value" ;;
+            interface:s1) awg_s1="$value" ;;
+            interface:s2) awg_s2="$value" ;;
+            interface:s3) awg_s3="$value" ;;
+            interface:s4) awg_s4="$value" ;;
+            interface:h1) awg_h1="$value" ;;
+            interface:h2) awg_h2="$value" ;;
+            interface:h3) awg_h3="$value" ;;
+            interface:h4) awg_h4="$value" ;;
+            interface:i1) awg_i1="$value" ;;
+            interface:i2) awg_i2="$value" ;;
+            interface:i3) awg_i3="$value" ;;
+            interface:i4) awg_i4="$value" ;;
+            interface:i5) awg_i5="$value" ;;
+            peer:publickey) public_key="$value" ;;
+            peer:presharedkey) preshared_key="$value" ;;
+            peer:endpoint) endpoint="$value" ;;
+            peer:allowedips) allowed_ips="$(normalize_list_value "$value")" ;;
+            peer:persistentkeepalive) persistent_keepalive="$value" ;;
+        esac
+    done < "$config_file"
+
+    [ -n "$private_key" ] || die 'В конфиге не найден PrivateKey в секции [Interface].'
+    [ -n "$address" ] || die 'В конфиге не найден Address в секции [Interface].'
+    [ -n "$public_key" ] || die 'В конфиге не найден PublicKey в секции [Peer].'
+
+    uci set network.$iface=interface
+    uci set network.$iface.proto="$proto"
+    uci set network.$iface.private_key="$private_key"
+    uci set network.$iface.addresses="$address"
+    set_network_opt "$iface" listen_port "$listen_port"
+    set_network_opt "$iface" dns "$dns"
+
+    if [ "$peer_type" = 'awg' ]; then
+        set_network_opt "$iface" awg_jc "$awg_jc"
+        set_network_opt "$iface" awg_jmin "$awg_jmin"
+        set_network_opt "$iface" awg_jmax "$awg_jmax"
+        set_network_opt "$iface" awg_s1 "$awg_s1"
+        set_network_opt "$iface" awg_s2 "$awg_s2"
+        set_network_opt "$iface" awg_s3 "$awg_s3"
+        set_network_opt "$iface" awg_s4 "$awg_s4"
+        set_network_opt "$iface" awg_h1 "$awg_h1"
+        set_network_opt "$iface" awg_h2 "$awg_h2"
+        set_network_opt "$iface" awg_h3 "$awg_h3"
+        set_network_opt "$iface" awg_h4 "$awg_h4"
+        set_network_opt "$iface" awg_i1 "$awg_i1"
+        set_network_opt "$iface" awg_i2 "$awg_i2"
+        set_network_opt "$iface" awg_i3 "$awg_i3"
+        set_network_opt "$iface" awg_i4 "$awg_i4"
+        set_network_opt "$iface" awg_i5 "$awg_i5"
+    fi
+
+    reset_peer_sections "$peer_section"
+    uci add network "$peer_section" >/dev/null
+    uci set network.@$peer_section[0].name="${iface}_client"
+    uci set network.@$peer_section[0].public_key="$public_key"
+    set_network_opt "@$peer_section[0]" preshared_key "$preshared_key"
+    uci set network.@$peer_section[0].route_allowed_ips='0'
+    uci set network.@$peer_section[0].allowed_ips="$allowed_ips"
+    set_network_opt "@$peer_section[0]" persistent_keepalive "$persistent_keepalive"
+    if [ -n "$endpoint" ]; then
+        parse_endpoint_value "$endpoint"
+        set_network_opt "@$peer_section[0]" endpoint_host "$endpoint_host"
+        set_network_opt "@$peer_section[0]" endpoint_port "$endpoint_port"
+    else
+        uci -q delete network.@$peer_section[0].endpoint_host >/dev/null 2>&1 || true
+        uci -q delete network.@$peer_section[0].endpoint_port >/dev/null 2>&1 || true
+    fi
+
+    uci commit network
+    log "Конфиг $iface применён через UCI."
+}
+
+configure_wg_manual() {
+    iface="$1"
+    peer_type="$2"
+    proto="$3"
+    peer_section="$4"
+
+    echo 'Теперь введите параметры клиента из конфигурации туннеля.'
+    echo 'Подсказки будут отображаться перед каждой строкой ввода.'
+    private_key="$(read_secret 'Введите PrivateKey из секции [Interface]:')"
+    address="$(read_default 'Введите Address с маской, например 10.8.0.2/32 или 192.168.100.5/24' '10.8.0.2/32')"
+    dns="$(read_secret 'Введите DNS из секции [Interface] или оставьте пустым:')"
+
+    uci set network.$iface=interface
+    uci set network.$iface.proto="$proto"
+    uci set network.$iface.private_key="$private_key"
+    uci set network.$iface.addresses="$(normalize_list_value "$address")"
+    uci set network.$iface.listen_port='51820'
+    set_network_opt "$iface" dns "$(normalize_list_value "$dns")"
+
+    if [ "$peer_type" = 'awg' ]; then
+        echo 'Введите параметры AmneziaWG. Если параметра нет в конфиге, оставьте пустым.'
+        awg_jc="$(read_default 'Введите Jc' '3')"
+        awg_jmin="$(read_default 'Введите Jmin' '10')"
+        awg_jmax="$(read_default 'Введите Jmax' '50')"
+        awg_s1="$(read_secret 'Введите S1 или оставьте пустым:')"
+        awg_s2="$(read_secret 'Введите S2 или оставьте пустым:')"
+        awg_s3="$(read_secret 'Введите S3 или оставьте пустым:')"
+        awg_s4="$(read_secret 'Введите S4 или оставьте пустым:')"
+        awg_h1="$(read_secret 'Введите H1 или оставьте пустым:')"
+        awg_h2="$(read_secret 'Введите H2 или оставьте пустым:')"
+        awg_h3="$(read_secret 'Введите H3 или оставьте пустым:')"
+        awg_h4="$(read_secret 'Введите H4 или оставьте пустым:')"
+        awg_i1="$(read_secret 'Введите I1 полностью, включая <b ...>, или оставьте пустым:')"
+        awg_i2="$(read_secret 'Введите I2 полностью, включая <b ...>, или оставьте пустым:')"
+        awg_i3="$(read_secret 'Введите I3 полностью, включая <b ...>, или оставьте пустым:')"
+        awg_i4="$(read_secret 'Введите I4 полностью, включая <b ...>, или оставьте пустым:')"
+        awg_i5="$(read_secret 'Введите I5 полностью, включая <b ...>, или оставьте пустым:')"
+        set_network_opt "$iface" awg_jc "$awg_jc"
+        set_network_opt "$iface" awg_jmin "$awg_jmin"
+        set_network_opt "$iface" awg_jmax "$awg_jmax"
+        set_network_opt "$iface" awg_s1 "$awg_s1"
+        set_network_opt "$iface" awg_s2 "$awg_s2"
+        set_network_opt "$iface" awg_s3 "$awg_s3"
+        set_network_opt "$iface" awg_s4 "$awg_s4"
+        set_network_opt "$iface" awg_h1 "$awg_h1"
+        set_network_opt "$iface" awg_h2 "$awg_h2"
+        set_network_opt "$iface" awg_h3 "$awg_h3"
+        set_network_opt "$iface" awg_h4 "$awg_h4"
+        set_network_opt "$iface" awg_i1 "$awg_i1"
+        set_network_opt "$iface" awg_i2 "$awg_i2"
+        set_network_opt "$iface" awg_i3 "$awg_i3"
+        set_network_opt "$iface" awg_i4 "$awg_i4"
+        set_network_opt "$iface" awg_i5 "$awg_i5"
+    fi
+
+    public_key="$(read_secret 'Введите PublicKey из секции [Peer]:')"
+    preshared_key="$(read_secret 'Введите PresharedKey из секции [Peer] или оставьте пустым:')"
+    endpoint_host="$(read_secret 'Введите Endpoint host без порта:')"
+    endpoint_port="$(read_default 'Введите Endpoint port' '51820')"
+    allowed_ips="$(read_default 'Введите AllowedIPs' '0.0.0.0/0')"
+    persistent_keepalive="$(read_default 'Введите PersistentKeepalive' '25')"
+
+    reset_peer_sections "$peer_section"
+    uci add network "$peer_section" >/dev/null
+    uci set network.@$peer_section[0].name="${iface}_client"
+    uci set network.@$peer_section[0].public_key="$public_key"
+    set_network_opt "@$peer_section[0]" preshared_key "$preshared_key"
+    uci set network.@$peer_section[0].route_allowed_ips='0'
+    uci set network.@$peer_section[0].allowed_ips="$(normalize_list_value "$allowed_ips")"
+    set_network_opt "@$peer_section[0]" persistent_keepalive "$persistent_keepalive"
+    set_network_opt "@$peer_section[0]" endpoint_host "$endpoint_host"
+    set_network_opt "@$peer_section[0]" endpoint_port "$endpoint_port"
+    uci commit network
+}
+
 configure_wg_interface() {
     iface="$1"
     peer_type="$2"
@@ -502,68 +854,32 @@ configure_wg_interface() {
         install_awg_packages
         proto='amneziawg'
         peer_section="amneziawg_$iface"
+        echo 'Выберите способ настройки AmneziaWG:'
+        echo '1) Вставить весь готовый конфиг [Interface]/[Peer] [рекомендуется]'
+        echo '2) Ввести поля вручную'
+        echo
+        echo 'Нажмите Enter для варианта 1.'
+        awg_import_choice="$(read_default 'Ваш выбор' '1')"
+        case "$awg_import_choice" in
+            ''|1)
+                tmp_conf="/tmp/domain-routing-awg-conf.$$"
+                read_multiline_config "$tmp_conf"
+                apply_wg_config_file "$tmp_conf" "$iface" "$peer_type" "$proto" "$peer_section"
+                rm -f "$tmp_conf"
+                return 0
+                ;;
+            *)
+                configure_wg_manual "$iface" "$peer_type" "$proto" "$peer_section"
+                return 0
+                ;;
+        esac
     else
         install_wireguard
         proto='wireguard'
         peer_section="wireguard_$iface"
+        configure_wg_manual "$iface" "$peer_type" "$proto" "$peer_section"
     fi
-
-    echo 'Теперь введите параметры клиента из конфигурации туннеля.'
-    echo 'Подсказки будут отображаться перед каждой строкой ввода.'
-    private_key="$(read_secret 'Введите PrivateKey из секции [Interface]:')"
-    address="$(read_default 'Введите Address с маской, например 10.8.0.2/32 или 192.168.100.5/24' '10.8.0.2/32')"
-
-    uci set network.$iface=interface
-    uci set network.$iface.proto="$proto"
-    uci set network.$iface.private_key="$private_key"
-    uci set network.$iface.addresses="$address"
-    uci set network.$iface.listen_port='51820'
-
-    if [ "$peer_type" = 'awg' ]; then
-        awg_jc="$(read_default 'Введите Jc' '3')"
-        awg_jmin="$(read_default 'Введите Jmin' '10')"
-        awg_jmax="$(read_default 'Введите Jmax' '50')"
-        awg_s1="$(read_secret 'Введите S1:')"
-        awg_s2="$(read_secret 'Введите S2:')"
-        awg_h1="$(read_secret 'Введите H1:')"
-        awg_h2="$(read_secret 'Введите H2:')"
-        awg_h3="$(read_secret 'Введите H3:')"
-        awg_h4="$(read_secret 'Введите H4:')"
-        uci set network.$iface.awg_jc="$awg_jc"
-        uci set network.$iface.awg_jmin="$awg_jmin"
-        uci set network.$iface.awg_jmax="$awg_jmax"
-        uci set network.$iface.awg_s1="$awg_s1"
-        uci set network.$iface.awg_s2="$awg_s2"
-        uci set network.$iface.awg_h1="$awg_h1"
-        uci set network.$iface.awg_h2="$awg_h2"
-        uci set network.$iface.awg_h3="$awg_h3"
-        uci set network.$iface.awg_h4="$awg_h4"
-    fi
-
-    public_key="$(read_secret 'Введите PublicKey из секции [Peer]:')"
-    preshared_key="$(read_secret 'Введите PresharedKey из секции [Peer] или оставьте пустым:')"
-    endpoint_host="$(read_secret 'Введите Endpoint host без порта:')"
-    endpoint_port="$(read_default 'Введите Endpoint port' '51820')"
-
-    if ! uci show network 2>/dev/null | grep -q "=\'$peer_section\'"; then
-        uci add network "$peer_section" >/dev/null
-    fi
-    uci set network.@$peer_section[0]=${peer_section}
-    uci set network.@$peer_section[0].name="${iface}_client"
-    uci set network.@$peer_section[0].public_key="$public_key"
-    if [ -n "$preshared_key" ]; then
-        uci set network.@$peer_section[0].preshared_key="$preshared_key"
-    else
-        uci -q delete network.@$peer_section[0].preshared_key >/dev/null 2>&1 || true
-    fi
-    uci set network.@$peer_section[0].route_allowed_ips='0'
-    uci set network.@$peer_section[0].persistent_keepalive='25'
-    uci set network.@$peer_section[0].endpoint_host="$endpoint_host"
-    uci set network.@$peer_section[0].endpoint_port="$endpoint_port"
-    uci set network.@$peer_section[0].allowed_ips='0.0.0.0/0'
-    uci commit network
 }
-
 install_singbox_converter() {
     mkdir -p "$BASE_DIR" "$SINGBOX_SOURCE_DIR"
 
@@ -1050,7 +1366,8 @@ ensure_cron() {
 
 install_base_packages() {
     pkg_update
-    pkg_install curl || true
+    # Не ставим curl принудительно: на маленьких роутерах 16 МБ flash важен каждый мегабайт.
+    # fetch_url умеет работать через встроенный wget; curl ставим только если пользователь выберет сценарий, где он реально нужен.
     pkg_install ca-bundle || true
     pkg_install ip-full || true
     install_dnsmasq_full
@@ -1065,12 +1382,16 @@ main() {
     ensure_directories
     seed_lists
     select_domain_source
+    select_safety_options
     write_config
     install_base_packages
     ensure_dnsmasq_confdir
+    ensure_lan_dns_default
+    ensure_ipv6_mode
     ensure_rt_table
     ensure_network_mark_rule
     ensure_firewall
+    ensure_force_lan_dns
     select_tunnel
     write_update_script
     write_init_script
@@ -1085,7 +1406,8 @@ main() {
     log 'Готово'
     echo "Домены можно менять здесь: $DOMAINS_DIR"
     echo "IP/CIDR списки можно менять здесь: $IPS_DIR"
-    echo "После изменений запустите: /etc/init.d/getdomains start"
+    echo "После изменений запустите: /etc/init.d/getdomains restart"
+    echo 'Если маршрутизация не сработала на телефоне/ПК, отключите Private DNS/DoH и переподключите Wi-Fi.'
 }
 
 main "$@"

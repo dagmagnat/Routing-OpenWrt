@@ -69,6 +69,14 @@ check_uci firewall "name='$IP_SET'" "firewall set $IP_SET exists"
 check_uci firewall "name='mark_domains'" 'mark_domains rule exists'
 check_uci firewall "name='mark_ip'" 'mark_ip rule exists'
 check_uci network "name='mark0x1'" 'network policy rule mark0x1 exists'
+check_uci firewall "name='domainrouting_force_dns_udp'" 'optional DNS UDP redirect exists'
+check_uci firewall "name='domainrouting_force_dns_tcp'" 'optional DNS TCP redirect exists'
+
+if [ "$(uci -q get dhcp.lan.ra 2>/dev/null || true)" = 'disabled' ]; then
+    echo "$OK LAN IPv6 RA disabled (IPv4-only routing mode)"
+else
+    echo "$WARN LAN IPv6 RA is not disabled. IPv6 clients may bypass IPv4 domain routing."
+fi
 
 if nft list set "${NFT_FAMILY:-inet}" "${NFT_TABLE:-fw4}" "${DOMAIN_SET:-vpn_domains}" >/tmp/domain-routing-domain-set.log 2>&1; then
     echo "$OK nft set ${DOMAIN_SET:-vpn_domains} exists"

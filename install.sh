@@ -50,13 +50,13 @@ pkg_update_and_deps() {
             log 'Обновляю индексы apk'
             apk update || die 'apk update завершился с ошибкой'
             log 'Устанавливаю базовые зависимости'
-            apk add curl ca-bundle tar gzip jq || die 'Не удалось установить базовые зависимости через apk'
+            apk add ca-bundle tar gzip || die 'Не удалось установить базовые зависимости через apk'
             ;;
         opkg)
             log 'Обновляю индексы opkg'
             opkg update || die 'opkg update завершился с ошибкой'
             log 'Устанавливаю базовые зависимости'
-            opkg install curl ca-bundle tar gzip jq || die 'Не удалось установить базовые зависимости через opkg'
+            opkg install ca-bundle tar gzip || die 'Не удалось установить базовые зависимости через opkg'
             ;;
         *)
             die 'Не найден ни apk, ни opkg. Этот установщик предназначен для OpenWrt.'

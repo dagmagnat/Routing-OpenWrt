@@ -1,3 +1,9 @@
+## v8
+
+- Добавлен импорт полного AmneziaWG/WireGuard-конфига `[Interface]` + `[Peer]` прямо во время установки.
+- Добавлена поддержка расширенных параметров AmneziaWG: `S3`, `S4`, `I1`, `I2`, `I3`, `I4`, `I5`.
+- Рекомендуемый сценарий для AmneziaWG теперь — вставить весь готовый конфиг и завершить ввод строкой `END`, чтобы не переписывать длинный `I1 = <b ...>` вручную.
+
 
 ## v7
 
@@ -82,3 +88,11 @@
 - Wrapped the external AmneziaWG installer with a timeout and closed stdin so it cannot hang indefinitely after package installation.
 - Stopped replacing `/etc/config/dhcp` with `/etc/config/dhcp-opkg` after installing `dnsmasq-full`. Existing DHCP/DNS settings are preserved.
 - Bootstrap installer now creates `/tmp/Routing-OpenWrt` as a convenient symlink to the extracted GitHub archive directory, so interrupted installs are easier to resume.
+
+## v9
+
+- Добавлен режим надёжности для доменной маршрутизации: перехват DNS TCP/UDP 53 с LAN на dnsmasq.
+- Добавлен опциональный IPv4-only режим: отключение RA/DHCPv6/NDP на LAN, чтобы IPv6 не обходил IPv4-маршрутизацию.
+- Установщик стал легче для роутеров 16 MB flash: `jq` и `curl` больше не ставятся в bootstrap без необходимости.
+- `getdomains-check.sh` теперь проверяет DNS redirect и предупреждает, если IPv6 LAN не отключён.
+- Uninstall удаляет DNS redirect, созданный domain-routing.
