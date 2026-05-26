@@ -12,6 +12,7 @@ REPO_BRANCH="${REPO_BRANCH:-main}"
 ARCHIVE_URL="${ARCHIVE_URL:-https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$REPO_BRANCH.tar.gz}"
 WORK_DIR="${WORK_DIR:-/tmp}"
 PROJECT_DIR="$WORK_DIR/$REPO_NAME-$REPO_BRANCH"
+PROJECT_LINK="$WORK_DIR/$REPO_NAME"
 
 log() { printf '\033[32;1m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33;1m%s\033[0m\n' "$*"; }
@@ -72,7 +73,7 @@ run_local_or_downloaded_installer() {
 
     mkdir -p "$WORK_DIR" || die "Не удалось создать $WORK_DIR"
     cd "$WORK_DIR" || die "Не удалось перейти в $WORK_DIR"
-    rm -rf "$PROJECT_DIR" "/tmp/$REPO_NAME-main" "/tmp/$REPO_NAME-$REPO_BRANCH" "$WORK_DIR/$REPO_NAME.tar.gz"
+    rm -rf "$PROJECT_DIR" "$PROJECT_LINK" "/tmp/$REPO_NAME-main" "/tmp/$REPO_NAME-$REPO_BRANCH" "$WORK_DIR/$REPO_NAME.tar.gz"
 
     log "Скачиваю $REPO_OWNER/$REPO_NAME с GitHub"
     fetch_url "$ARCHIVE_URL" "$WORK_DIR/$REPO_NAME.tar.gz" || die "Не удалось скачать $ARCHIVE_URL"
@@ -83,8 +84,14 @@ run_local_or_downloaded_installer() {
     [ -d "$PROJECT_DIR" ] || PROJECT_DIR="$(find "$WORK_DIR" -maxdepth 1 -type d -name "$REPO_NAME-*" | head -n 1)"
     [ -n "$PROJECT_DIR" ] && [ -f "$PROJECT_DIR/getdomains-install.sh" ] || die 'В скачанном проекте не найден getdomains-install.sh'
 
+    if [ "$PROJECT_DIR" != "$PROJECT_LINK" ]; then
+        ln -s "$PROJECT_DIR" "$PROJECT_LINK" 2>/dev/null || true
+    fi
+
     cd "$PROJECT_DIR" || die "Не удалось перейти в $PROJECT_DIR"
     log 'Запускаю getdomains-install.sh'
+    log "Если установку прервали, повторно зайдите так: cd $PROJECT_DIR && sh getdomains-install.sh"
+    [ -e "$PROJECT_LINK" ] && log "Короткий путь также доступен: cd $PROJECT_LINK"
     sh ./getdomains-install.sh
 }
 

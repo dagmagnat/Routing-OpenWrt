@@ -69,3 +69,10 @@
 - Added explicit input prompts such as `Ваш выбор [1]:` and `Ваш выбор [6]:` so users see where to type the menu number.
 - Translated bootstrap installer messages in `install.sh`.
 - Translated the most common Sing-box converter messages.
+
+## v6 - AmneziaWG reinstall guard and safer dnsmasq-full upgrade
+
+- Added AmneziaWG readiness checks. If `kmod-amneziawg`, `amneziawg-tools` and the `amneziawg` netifd/LuCI protocol handler are already present, the installer skips the external AmneziaWG installer.
+- Wrapped the external AmneziaWG installer with a timeout and closed stdin so it cannot hang indefinitely after package installation.
+- Stopped replacing `/etc/config/dhcp` with `/etc/config/dhcp-opkg` after installing `dnsmasq-full`. Existing DHCP/DNS settings are preserved.
+- Bootstrap installer now creates `/tmp/Routing-OpenWrt` as a convenient symlink to the extracted GitHub archive directory, so interrupted installs are easier to resume.

@@ -138,7 +138,10 @@ install_dnsmasq_full() {
         opkg download dnsmasq-full || die 'Не удалось скачать dnsmasq-full'
         opkg remove dnsmasq >/dev/null 2>&1 || true
         opkg install /tmp/dnsmasq-full*.ipk || opkg install dnsmasq-full || die 'Не удалось установить dnsmasq-full'
-        [ -f /etc/config/dhcp-opkg ] && cp /etc/config/dhcp /etc/config/dhcp-old && mv /etc/config/dhcp-opkg /etc/config/dhcp
+        if [ -f /etc/config/dhcp-opkg ]; then
+            warn 'opkg создал /etc/config/dhcp-opkg. Текущий /etc/config/dhcp не перезаписываю.'
+            warn 'Это нормально: OpenWrt сохранил ваши текущие настройки DHCP/DNS.'
+        fi
     fi
 }
 
@@ -418,10 +421,48 @@ install_wireguard() {
     pkg_install wireguard-tools
 }
 
+awg_core_installed() {
+    pkg_installed kmod-amneziawg && pkg_installed amneziawg-tools
+}
+
+awg_proto_installed() {
+    pkg_installed luci-proto-amneziawg || [ -f /lib/netifd/proto/amneziawg.sh ]
+}
+
+awg_ready() {
+    awg_core_installed && awg_proto_installed
+}
+
+run_with_timeout() {
+    timeout_seconds="$1"
+    shift
+    "$@" &
+    pid="$!"
+    elapsed=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$elapsed" -ge "$timeout_seconds" ]; then
+            warn "Команда выполняется дольше ${timeout_seconds} секунд, останавливаю её и продолжаю проверку установленных пакетов."
+            kill "$pid" 2>/dev/null || true
+            sleep 2
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    wait "$pid"
+}
+
 install_awg_packages() {
-    if pkg_installed amneziawg-tools; then
-        log 'amneziawg-tools already installed'
+    if awg_ready; then
+        log 'Пакеты AmneziaWG уже установлены, пропускаю установку.'
         return 0
+    fi
+
+    if awg_core_installed; then
+        warn 'kmod-amneziawg и amneziawg-tools уже установлены, но протокол amneziawg для netifd/LuCI не найден.'
+        warn 'Попробую дозагрузить недостающий компонент через установщик AmneziaWG.'
     fi
 
     url='https://raw.githubusercontent.com/Slava-Shchipunov/awg-openwrt/refs/heads/master/amneziawg-install.sh'
@@ -430,10 +471,24 @@ install_awg_packages() {
     if fetch_url "$url" "$tmp"; then
         chmod +x "$tmp"
         # -en: non-interactive package installation mode from upstream installer.
-        sh "$tmp" -en || warn 'Upstream-установщик AmneziaWG вернул ошибку. Возможно, AWG-пакеты нужно установить вручную.'
+        # stdin закрыт, чтобы внешний установщик не мог зависнуть на вопросе пользователю.
+        run_with_timeout 300 sh "$tmp" -en </dev/null || warn 'Установщик AmneziaWG завершился с ошибкой или был остановлен по таймауту. Проверяю, что уже установлено.'
     else
         warn 'Не удалось скачать установщик AmneziaWG. Установите AWG-пакеты вручную и запустите скрипт ещё раз.'
     fi
+
+    if awg_ready; then
+        log 'AmneziaWG уже готов к настройке, продолжаю установку маршрутизации.'
+        return 0
+    fi
+
+    if awg_core_installed; then
+        warn 'Основные пакеты AmneziaWG установлены, но протокол amneziawg для UCI/netifd не найден.'
+        warn 'Если интерфейс awg0 не поднимется, установите luci-proto-amneziawg и запустите скрипт повторно.'
+        return 0
+    fi
+
+    die 'AmneziaWG не установлен. Установите kmod-amneziawg и amneziawg-tools, затем запустите скрипт повторно.'
 }
 
 configure_wg_interface() {
