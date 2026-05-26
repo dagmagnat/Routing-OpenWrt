@@ -41,7 +41,9 @@ die() { err "$*"; exit 1; }
 read_default() {
     prompt="$1"
     default="$2"
-    printf "%s [%s]:\n" "$prompt" "$default"
+    # Prompt goes to stderr because the returned value is captured with command substitution.
+    # If this is printed to stdout, OpenWrt appears to "hang" while actually waiting for hidden input.
+    printf "%s [%s]: " "$prompt" "$default" >&2
     IFS= read -r answer || answer=''
     if [ -z "$answer" ]; then
         printf '%s' "$default"
@@ -52,7 +54,8 @@ read_default() {
 
 read_secret() {
     prompt="$1"
-    printf "%s\n" "$prompt"
+    # Prompt goes to stderr because stdout is used as the function return value.
+    printf "%s " "$prompt" >&2
     IFS= read -r answer || answer=''
     printf '%s' "$answer"
 }
@@ -505,6 +508,8 @@ configure_wg_interface() {
         peer_section="wireguard_$iface"
     fi
 
+    echo 'Теперь введите параметры клиента из конфигурации туннеля.'
+    echo 'Подсказки будут отображаться перед каждой строкой ввода.'
     private_key="$(read_secret 'Введите PrivateKey из секции [Interface]:')"
     address="$(read_default 'Введите Address с маской, например 10.8.0.2/32 или 192.168.100.5/24' '10.8.0.2/32')"
 
