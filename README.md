@@ -26,6 +26,17 @@
 - Для IP-списков использует persistent `loadfile`: `/etc/domain-routing/generated/vpn_ip.lst`.
 
 
+
+## Быстрая установка одной командой
+
+Эта команда скачивает bootstrap-скрипт именно из вашего репозитория `dagmagnat/Routing-OpenWrt`, обновляет зависимости роутера, скачивает проект и запускает установщик:
+
+```sh
+cd /tmp && (wget -O install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh || curl -fsSL -o install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh) && sh install.sh
+```
+
+В этой команде нет скачивания старого оригинального проекта. Оригинальный репозиторий указан только как атрибуция в начале README и в `NOTICE.md`.
+
 ## Установка с GitHub dagmagnat
 
 Когда вы выложите проект в свой GitHub, установка должна идти уже из вашего репозитория, а ссылка на оригинальный проект остаётся только как атрибуция “за основу взято отсюда”.
@@ -41,9 +52,9 @@ else
   opkg update
   opkg install git git-http curl ca-bundle jq
 fi
-rm -rf domain-routing-openwrt
-git clone --depth=1 https://github.com/dagmagnat/domain-routing-openwrt.git
-cd domain-routing-openwrt
+rm -rf Routing-OpenWrt
+git clone --depth=1 https://github.com/dagmagnat/Routing-OpenWrt.git
+cd Routing-OpenWrt
 sh getdomains-install.sh
 ```
 
@@ -58,13 +69,13 @@ else
   opkg update
   opkg install curl ca-bundle tar gzip jq
 fi
-rm -rf domain-routing-openwrt-main
-curl -L https://github.com/dagmagnat/domain-routing-openwrt/archive/refs/heads/main.tar.gz | tar -xz
-cd domain-routing-openwrt-main
+rm -rf Routing-OpenWrt-main
+curl -L https://github.com/dagmagnat/Routing-OpenWrt/archive/refs/heads/main.tar.gz | tar -xz
+cd Routing-OpenWrt-main
 sh getdomains-install.sh
 ```
 
-Если имя репозитория будет другим, замените `domain-routing-openwrt` в командах на фактическое имя.
+Если имя репозитория будет другим, замените `Routing-OpenWrt` в командах на фактическое имя.
 
 ## Установка shell-скриптом
 

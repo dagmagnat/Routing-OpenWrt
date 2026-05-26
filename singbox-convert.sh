@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Convert common 3X-UI/Xray client links or subscription output to a sing-box
-# TUN client config for domain-routing-openwrt.
+# TUN client config for Routing-OpenWrt.
 # Supported input: vless://, vmess://, trojan://, ss://, plain/base64 subscriptions,
 # full sing-box config.json, or a single sing-box outbound JSON object.
 

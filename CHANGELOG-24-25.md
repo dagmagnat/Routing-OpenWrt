@@ -52,5 +52,13 @@
   - keep existing `/etc/sing-box/config.json`;
   - create placeholder template only.
 - Converter supports plain subscriptions, base64 encoded subscriptions, full sing-box JSON configs, and single outbound JSON objects.
-- Installer now uses `dagmagnat/domain-routing-openwrt` as the default raw source when it has to fetch helper files.
+- Installer now uses `dagmagnat/Routing-OpenWrt` as the default raw source when it has to fetch helper files.
 - Added explicit installation commands that update router package indexes and install bootstrap dependencies before running the project installer.
+
+
+## v4 - Correct GitHub repository name and bootstrap installer
+
+- Changed all installation URLs to the actual repository `dagmagnat/Routing-OpenWrt`.
+- Added `install.sh`: a bootstrap installer that updates router dependencies first, then downloads and runs the project from `dagmagnat/Routing-OpenWrt`.
+- Updated README install commands so users install from your GitHub, while the original project remains only as attribution.
+- Updated Ansible metadata to point issue tracking to `dagmagnat/Routing-OpenWrt`.

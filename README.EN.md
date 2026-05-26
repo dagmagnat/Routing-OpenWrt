@@ -60,6 +60,17 @@ sh getdomains-uninstall.sh --purge
 ```
 
 
+
+## One-command install
+
+This command downloads the bootstrap installer from your repository `dagmagnat/Routing-OpenWrt`, updates router dependencies, downloads the project, and starts the installer:
+
+```sh
+cd /tmp && (wget -O install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh || curl -fsSL -o install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh) && sh install.sh
+```
+
+This command does not download the old upstream project. The upstream repository is mentioned only as attribution in README and `NOTICE.md`.
+
 ## GitHub installation from dagmagnat
 
 After publishing this maintenance fork, installation should use your repository. The original repository remains credited as the upstream base only.
@@ -73,9 +84,9 @@ else
   opkg update
   opkg install git git-http curl ca-bundle jq
 fi
-rm -rf domain-routing-openwrt
-git clone --depth=1 https://github.com/dagmagnat/domain-routing-openwrt.git
-cd domain-routing-openwrt
+rm -rf Routing-OpenWrt
+git clone --depth=1 https://github.com/dagmagnat/Routing-OpenWrt.git
+cd Routing-OpenWrt
 sh getdomains-install.sh
 ```
 

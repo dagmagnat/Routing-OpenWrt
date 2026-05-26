@@ -1,10 +1,10 @@
 ---
 galaxy_info:
   role_name: domain_routing_openwrt
-  namespace: itdoginfo
-  author: itdog
-  description: Configuring domain routing on Openwrt router
-  issue_tracker_url: https://github.com/itdoginfo/domain-routing-openwrt/issues
+  namespace: dagmagnat
+  author: dagmagnat
+  description: Domain routing for OpenWrt 24/25 with persistent lists and sing-box import
+  issue_tracker_url: https://github.com/dagmagnat/Routing-OpenWrt/issues
   license: GPL-3.0
   min_ansible_version: 2.10.7
   platforms:
