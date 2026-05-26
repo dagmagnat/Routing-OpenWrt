@@ -1,0 +1,11 @@
+#!/bin/sh
+
+[ "$ACTION" = 'ifup' ] || [ "$ACTION" = 'ifupdate' ] || [ "$ACTION" = 'iflink' ] || exit 0
+
+{% if tunnel == "wg" %}
+ip route replace table vpn default dev wg0 2>/dev/null || true
+{% elif tunnel == "awg" %}
+ip route replace table vpn default dev awg0 2>/dev/null || true
+{% elif (tunnel == "openvpn") or (tunnel == "singbox") or (tunnel == "tun2socks") %}
+ip route replace table vpn default dev tun0 2>/dev/null || true
+{% endif %}
