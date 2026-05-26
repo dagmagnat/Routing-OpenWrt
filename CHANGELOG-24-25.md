@@ -41,3 +41,16 @@
 
 - Replaced legacy `getdomains-check.sh` with a focused OpenWrt 24/25 health check.
 - `/etc/init.d/getdomains status` shows generated files and nft sets.
+
+## v3 - Sing-box import/converter and dagmagnat install flow
+
+- Added `singbox-convert.sh`.
+- Sing-box installer mode now asks how to configure outbound:
+  - paste one `vless://`, `vmess://`, `trojan://` or `ss://` link;
+  - enter a 3X-UI/subscription URL;
+  - convert a local file already uploaded to the router;
+  - keep existing `/etc/sing-box/config.json`;
+  - create placeholder template only.
+- Converter supports plain subscriptions, base64 encoded subscriptions, full sing-box JSON configs, and single outbound JSON objects.
+- Installer now uses `dagmagnat/domain-routing-openwrt` as the default raw source when it has to fetch helper files.
+- Added explicit installation commands that update router package indexes and install bootstrap dependencies before running the project installer.

@@ -58,3 +58,38 @@ Purge everything:
 ```sh
 sh getdomains-uninstall.sh --purge
 ```
+
+
+## GitHub installation from dagmagnat
+
+After publishing this maintenance fork, installation should use your repository. The original repository remains credited as the upstream base only.
+
+```sh
+cd /tmp
+if command -v apk >/dev/null 2>&1; then
+  apk update
+  apk add git curl ca-bundle jq
+else
+  opkg update
+  opkg install git git-http curl ca-bundle jq
+fi
+rm -rf domain-routing-openwrt
+git clone --depth=1 https://github.com/dagmagnat/domain-routing-openwrt.git
+cd domain-routing-openwrt
+sh getdomains-install.sh
+```
+
+## Sing-box link/subscription/JSON converter
+
+When `Sing-box/tun0` is selected, the installer can now import a pasted `vless://`, `vmess://`, `trojan://` or `ss://` link, a subscription URL, a local file, a full sing-box `config.json`, or a single outbound JSON object.
+
+Manual usage:
+
+```sh
+/etc/domain-routing/singbox-convert.sh --link 'vless://...'
+/etc/domain-routing/singbox-convert.sh --url 'https://panel.example/sub/...'
+/etc/domain-routing/singbox-convert.sh --input /tmp/proxy.txt
+/etc/domain-routing/singbox-convert.sh --json /tmp/config.json
+```
+
+Output: `/etc/sing-box/config.json`.

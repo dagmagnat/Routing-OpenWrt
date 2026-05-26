@@ -59,3 +59,23 @@ ifup awg0
 ip addr show awg0
 logread -e amnezia -e awg
 ```
+
+## Additional v3 validation
+
+Checked locally before packaging:
+
+```sh
+sh -n getdomains-install.sh
+sh -n getdomains-uninstall.sh
+sh -n getdomains-check.sh
+sh -n singbox-convert.sh
+```
+
+Converter smoke tests were run for:
+
+- VLESS Reality link to generated sing-box TUN config.
+- Trojan TLS + WebSocket link to generated sing-box TUN config.
+- VMess base64 JSON link to generated sing-box TUN config.
+- Shadowsocks SIP002 link to generated sing-box TUN config.
+
+Limit: the package was not executed on a real OpenWrt 25.12.4 AVT router in this environment, so final validation still needs to be run on the target router with `sing-box check`, `logread`, nftables and route checks.

@@ -25,6 +25,47 @@
 - Поддерживает WireGuard, AmneziaWG, OpenVPN/tun0, Sing-box/tun0 и tun2socks/tun0.
 - Для IP-списков использует persistent `loadfile`: `/etc/domain-routing/generated/vpn_ip.lst`.
 
+
+## Установка с GitHub dagmagnat
+
+Когда вы выложите проект в свой GitHub, установка должна идти уже из вашего репозитория, а ссылка на оригинальный проект остаётся только как атрибуция “за основу взято отсюда”.
+
+Рекомендуемый вариант через `git`:
+
+```sh
+cd /tmp
+if command -v apk >/dev/null 2>&1; then
+  apk update
+  apk add git curl ca-bundle jq
+else
+  opkg update
+  opkg install git git-http curl ca-bundle jq
+fi
+rm -rf domain-routing-openwrt
+git clone --depth=1 https://github.com/dagmagnat/domain-routing-openwrt.git
+cd domain-routing-openwrt
+sh getdomains-install.sh
+```
+
+Вариант без `git`, если места мало:
+
+```sh
+cd /tmp
+if command -v apk >/dev/null 2>&1; then
+  apk update
+  apk add curl ca-bundle tar gzip jq
+else
+  opkg update
+  opkg install curl ca-bundle tar gzip jq
+fi
+rm -rf domain-routing-openwrt-main
+curl -L https://github.com/dagmagnat/domain-routing-openwrt/archive/refs/heads/main.tar.gz | tar -xz
+cd domain-routing-openwrt-main
+sh getdomains-install.sh
+```
+
+Если имя репозитория будет другим, замените `domain-routing-openwrt` в командах на фактическое имя.
+
 ## Установка shell-скриптом
 
 Скопируйте проект на роутер или скачайте только скрипт, затем выполните:
@@ -44,6 +85,60 @@ sh getdomains-install.sh
 /etc/init.d/getdomains start
 /etc/init.d/getdomains status
 ```
+
+
+## Sing-box: вставка ссылки, подписки или JSON
+
+При выборе пункта `Sing-box/tun0` установщик теперь предлагает отдельный выбор:
+
+1. Вставить одну клиентскую ссылку сразу в терминал: `vless://`, `vmess://`, `trojan://` или `ss://`.
+2. Вставить URL подписки из 3X-UI или другой панели.
+3. Указать локальный файл на роутере: текст со ссылкой, subscription-файл, полный `config.json` sing-box или один outbound JSON.
+4. Оставить уже существующий `/etc/sing-box/config.json`.
+5. Создать только шаблон.
+
+Основной сценарий для 3X-UI:
+
+```sh
+sh getdomains-install.sh
+# выбрать Sing-box/tun0
+# выбрать пункт 1
+# вставить vless://... или другую клиентскую ссылку из панели
+```
+
+Конвертер установлен сюда:
+
+```sh
+/etc/domain-routing/singbox-convert.sh
+```
+
+Его можно запускать отдельно:
+
+```sh
+/etc/domain-routing/singbox-convert.sh --link 'vless://...'
+/etc/domain-routing/singbox-convert.sh --url 'https://panel.example/sub/...'
+/etc/domain-routing/singbox-convert.sh --input /tmp/proxy.txt
+/etc/domain-routing/singbox-convert.sh --json /tmp/config.json
+```
+
+Результат всегда пишется сюда:
+
+```sh
+/etc/sing-box/config.json
+```
+
+Старый рабочий конфиг не затирается вслепую: перед заменой создаётся backup, а новый файл проверяется через `sing-box check`, если команда доступна.
+
+Поддерживаемые входные форматы:
+
+- `vless://`, включая VLESS Reality из 3X-UI;
+- `vmess://` base64 JSON;
+- `trojan://`;
+- `ss://` Shadowsocks SIP002;
+- plain subscription со строками ссылок;
+- base64 subscription;
+- полный sing-box `config.json`;
+- одиночный sing-box outbound JSON.
 
 ## Где менять домены вручную
 

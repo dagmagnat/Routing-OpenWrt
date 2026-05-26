@@ -20,6 +20,9 @@ DNSMASQ_FILE="$DNSMASQ_DIR/90-domain-routing.conf"
 IP_LOAD_FILE="$GEN_DIR/vpn_ip.lst"
 CFG_FILE="$BASE_DIR/config"
 UPDATE_SCRIPT="$BASE_DIR/getdomains-update.sh"
+CONVERTER_SCRIPT="$BASE_DIR/singbox-convert.sh"
+SINGBOX_SOURCE_DIR="$BASE_DIR/singbox"
+PROJECT_RAW_BASE="${PROJECT_RAW_BASE:-https://raw.githubusercontent.com/dagmagnat/domain-routing-openwrt/main}"
 INIT_SCRIPT='/etc/init.d/getdomains'
 TABLE_NAME='vpn'
 TABLE_ID='99'
@@ -498,11 +501,31 @@ configure_wg_interface() {
     uci commit network
 }
 
-configure_singbox_template() {
-    pkg_install sing-box || true
+install_singbox_converter() {
+    mkdir -p "$BASE_DIR" "$SINGBOX_SOURCE_DIR"
+
+    local_converter=''
+    for candidate in "./singbox-convert.sh" "$(dirname "$0")/singbox-convert.sh"; do
+        if [ -f "$candidate" ]; then
+            local_converter="$candidate"
+            break
+        fi
+    done
+
+    if [ -n "$local_converter" ]; then
+        cp "$local_converter" "$CONVERTER_SCRIPT" || die 'Failed to install singbox-convert.sh'
+    else
+        warn "singbox-convert.sh was not found next to installer; trying to download from $PROJECT_RAW_BASE"
+        if ! fetch_url "$PROJECT_RAW_BASE/singbox-convert.sh" "$CONVERTER_SCRIPT"; then
+            die 'Failed to install singbox-convert.sh. Clone the full repository instead of running only getdomains-install.sh.'
+        fi
+    fi
+    chmod +x "$CONVERTER_SCRIPT"
+}
+
+create_singbox_placeholder() {
     mkdir -p /etc/sing-box
-    [ -f /etc/config/sing-box ] && uci -q set sing-box.main.enabled='1' && uci -q set sing-box.main.user='root' && uci -q commit sing-box
-    if [ ! -f /etc/sing-box/config.json ] || ! grep -q '"interface_name".*tun0' /etc/sing-box/config.json; then
+    if [ ! -f /etc/sing-box/config.json ] || ! grep -q '"interface_name".*"tun0"' /etc/sing-box/config.json; then
         cat > /etc/sing-box/config.json <<'EOF_SB'
 {
   "log": { "level": "info" },
@@ -510,27 +533,105 @@ configure_singbox_template() {
     {
       "type": "tun",
       "interface_name": "tun0",
-      "domain_strategy": "ipv4_only",
       "address": ["172.16.250.1/30"],
       "auto_route": false,
       "strict_route": false,
-      "sniff": true
+      "sniff": true,
+      "domain_strategy": "ipv4_only"
     }
   ],
   "outbounds": [
     {
       "type": "shadowsocks",
+      "tag": "proxy",
       "server": "CHANGE_ME",
       "server_port": 443,
       "method": "2022-blake3-aes-128-gcm",
       "password": "CHANGE_ME"
-    }
+    },
+    { "type": "direct", "tag": "direct" },
+    { "type": "block", "tag": "block" }
   ],
-  "route": { "auto_detect_interface": true }
+  "route": {
+    "auto_detect_interface": true,
+    "final": "proxy"
+  }
 }
 EOF_SB
         warn 'Created /etc/sing-box/config.json template. Edit outbound settings before using sing-box.'
     fi
+}
+
+configure_singbox_template() {
+    pkg_install sing-box || true
+    pkg_install jq || true
+    pkg_install coreutils-base64 || true
+    mkdir -p /etc/sing-box "$SINGBOX_SOURCE_DIR"
+    [ -f /etc/config/sing-box ] && uci -q set sing-box.main.enabled='1' && uci -q set sing-box.main.user='root' && uci -q commit sing-box
+    install_singbox_converter
+
+    echo 'Sing-box outbound setup:'
+    echo '1) Paste one client link now: vless://, vmess://, trojan:// or ss:// [recommended for 3X-UI]'
+    echo '2) Enter a subscription URL from 3X-UI or another panel'
+    echo '3) Convert a local file already uploaded to the router: link/subscription/full config.json/outbound.json'
+    echo '4) Use existing /etc/sing-box/config.json without changes'
+    echo '5) Create placeholder template only'
+
+    while true; do
+        IFS= read -r sb_choice || sb_choice='1'
+        case "$sb_choice" in
+            ''|1)
+                link="$(read_secret 'Paste proxy link:')"
+                if [ -n "$link" ]; then
+                    "$CONVERTER_SCRIPT" --link "$link" || warn 'Sing-box conversion failed. Existing config was kept.'
+                else
+                    warn 'Empty link; creating placeholder template.'
+                    create_singbox_placeholder
+                fi
+                break
+                ;;
+            2)
+                sub_url="$(read_secret 'Enter subscription URL:')"
+                if [ -n "$sub_url" ]; then
+                    "$CONVERTER_SCRIPT" --url "$sub_url" || warn 'Subscription conversion failed. Existing config was kept.'
+                else
+                    warn 'Empty URL; creating placeholder template.'
+                    create_singbox_placeholder
+                fi
+                break
+                ;;
+            3)
+                input_path="$(read_default 'Enter local file path' '/tmp/proxy.txt')"
+                if [ -f "$input_path" ]; then
+                    "$CONVERTER_SCRIPT" --input "$input_path" || warn 'Local file conversion failed. Existing config was kept.'
+                else
+                    warn "File not found: $input_path"
+                    create_singbox_placeholder
+                fi
+                break
+                ;;
+            4)
+                if [ -f /etc/sing-box/config.json ]; then
+                    if command -v sing-box >/dev/null 2>&1; then
+                        sing-box check -c /etc/sing-box/config.json || warn 'Existing sing-box config did not pass sing-box check.'
+                    fi
+                    log 'Keeping existing /etc/sing-box/config.json'
+                else
+                    warn 'Existing config not found; creating placeholder template.'
+                    create_singbox_placeholder
+                fi
+                break
+                ;;
+            5)
+                create_singbox_placeholder
+                break
+                ;;
+            *) echo 'Choose 1-5' ;;
+        esac
+    done
+
+    /etc/init.d/sing-box enable >/dev/null 2>&1 || true
+    /etc/init.d/sing-box restart >/dev/null 2>&1 || true
 }
 
 select_tunnel() {
