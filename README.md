@@ -29,7 +29,7 @@
 
 ## Быстрая установка одной командой
 
-Эта команда скачивает bootstrap-скрипт именно из вашего репозитория `dagmagnat/Routing-OpenWrt`, обновляет зависимости роутера, скачивает проект и запускает установщик:
+Эта команда скачивает bootstrap-скрипт и обновляет зависимости роутера, скачивает проект и запускает установщик:
 
 ```sh
 cd /tmp && (wget -O install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh || curl -fsSL -o install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh) && sh install.sh
@@ -39,7 +39,6 @@ cd /tmp && (wget -O install.sh https://raw.githubusercontent.com/dagmagnat/Routi
 
 ## Установка с GitHub dagmagnat
 
-Когда вы выложите проект в свой GitHub, установка должна идти уже из вашего репозитория, а ссылка на оригинальный проект остаётся только как атрибуция “за основу взято отсюда”.
 
 Рекомендуемый вариант через `git`:
 
@@ -75,7 +74,6 @@ cd Routing-OpenWrt-main
 sh getdomains-install.sh
 ```
 
-Если имя репозитория будет другим, замените `Routing-OpenWrt` в командах на фактическое имя.
 
 ## Установка shell-скриптом
 
@@ -312,7 +310,7 @@ cd /tmp/Routing-OpenWrt-main
 sh getdomains-install.sh
 ```
 
-Начиная с v6 установщик также создаёт короткую ссылку:
+Установщик также создаёт короткую ссылку:
 
 ```sh
 cd /tmp/Routing-OpenWrt
@@ -368,7 +366,7 @@ sh getdomains-uninstall.sh --purge
 
 
 
-## Версия v9: что изменено для OpenWrt 24/25
+## Что изменено для OpenWrt 24/25?
 
 Главная проблема доменной маршрутизации на OpenWrt 24/25 обычно не в AmneziaWG/WireGuard, а в DNS и IPv6:
 
@@ -377,7 +375,7 @@ sh getdomains-uninstall.sh --purge
 - если клиент получает IPv6, трафик может уйти по IPv6 мимо IPv4-правил;
 - на роутерах 16 MB flash нельзя ставить лишние пакеты вроде `git`, `jq`, `curl` без необходимости.
 
-Поэтому установщик v9 добавляет режим надёжности:
+Поэтому установщик добавляет режим надёжности:
 
 1. перехват обычного DNS TCP/UDP 53 с LAN на локальный dnsmasq;
 2. опциональное отключение RA/DHCPv6/NDP на LAN для IPv4-only VPN-конфигов;
