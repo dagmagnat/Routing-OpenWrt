@@ -46,12 +46,37 @@ check_uci() {
 }
 
 echo 'Domain routing health check'
-. /etc/os-release 2>/dev/null || true
-echo "OpenWrt: ${OPENWRT_RELEASE:-unknown}"
+if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    echo "Firmware: ${PRETTY_NAME:-${OPENWRT_RELEASE:-OpenWrt-like}}"
+elif [ -r /etc/openwrt_release ]; then
+    . /etc/openwrt_release
+    echo "Firmware: ${DISTRIB_DESCRIPTION:-OpenWrt-like}"
+else
+    echo 'Firmware: unknown OpenWrt-like system'
+fi
+if command -v apk >/dev/null 2>&1; then
+    echo 'Package manager: apk'
+elif command -v opkg >/dev/null 2>&1; then
+    echo 'Package manager: opkg'
+else
+    echo 'Package manager: not found'
+fi
 
+check_cmd uci
 check_cmd dnsmasq
 check_cmd nft
 check_cmd ip
+if [ -x /sbin/fw4 ] || [ -x /usr/sbin/fw4 ]; then
+    echo "$OK fw4/firewall4 found"
+else
+    echo "$WARN fw4/firewall4 command not found; this project expects firewall4/nftables, not legacy fw3/iptables"
+fi
+if command -v dnsmasq >/dev/null 2>&1 && dnsmasq --help 2>/dev/null | grep -Eq 'nftset|connmark-allowlist'; then
+    echo "$OK dnsmasq appears to support nftset"
+else
+    echo "$WARN dnsmasq nftset support was not detected; install dnsmasq-full or use a firmware build with nftset support"
+fi
 check_file "$CFG_FILE"
 check_file "$DNSMASQ_FILE"
 check_file "$IP_LOAD_FILE"

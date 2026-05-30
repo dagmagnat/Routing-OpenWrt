@@ -105,3 +105,11 @@
 - DNS from WireGuard/AmneziaWG client configs is ignored by default via `USE_TUNNEL_DNS=0`, because provider DNS on the tunnel interface can break dnsmasq/nftset based domain routing.
 - Sing-box converter is installed only when a link/subscription/local conversion is actually selected. Existing `/etc/sing-box/config.json` and placeholder modes no longer fail just because the converter cannot be downloaded.
 - Invalid IPv4/CIDR entries are now checked more strictly: octets must be 0..255 and CIDR mask must be 0..32.
+
+## v10 - Portable installer for OpenWrt forks
+
+- Relaxed firmware detection: the installer now accepts OpenWrt-like systems such as ImmortalWrt and X-Wrt if UCI/fw4/nftables are present.
+- Added permissive HTTPS fallback for firmware with missing/stale CA certificates: `curl -k`, `wget --no-check-certificate`, and `opkg ... --no-check-certificate` retry paths.
+- Added package error diagnosis for TLS/CA errors, repository signature/key problems, network/DNS failures, kmod/kernel mismatches, and low flash/overlay space.
+- `dnsmasq-full` installation is no longer a blind hard stop: the installer checks whether the current dnsmasq already supports `nftset`, tries package-manager alternatives, and warns clearly if domain routing cannot work yet.
+- README now documents normal, certificate-fallback, strict-TLS, and offline installation commands.

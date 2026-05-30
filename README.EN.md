@@ -1,8 +1,8 @@
-# Domain routing OpenWrt 24/25
+# Domain routing for OpenWrt / ImmortalWrt / X-Wrt
 
 > Based on: [itdoginfo/domain-routing-openwrt](https://github.com/itdoginfo/domain-routing-openwrt).
 >
-> This is not the original project. It is a maintenance update for OpenWrt 24.10/25.12 with persistent list storage, safer updates, fw4/nftables changes, and manual domain/IP list management.
+> This is not the original project. It is a maintenance update for OpenWrt-like firmware with fw4/nftables: OpenWrt, ImmortalWrt, X-Wrt, and compatible builds.
 
 The main reliability change is persistent storage under `/etc/domain-routing`; generated dnsmasq configuration is written to `/etc/dnsmasq.d/90-domain-routing.conf`. Temporary files are no longer the only source of truth, and failed remote downloads do not erase the last valid config.
 
@@ -12,8 +12,8 @@ The main reliability change is persistent storage under `/etc/domain-routing`; g
 - Generated dnsmasq file moved to `/etc/dnsmasq.d/90-domain-routing.conf`.
 - Manual list directories added: `/etc/domain-routing/domains/*.lst` and `/etc/domain-routing/ips/*.lst`.
 - Remote downloads now use timeouts, locking, and fallback to the last valid cache.
-- Updated for OpenWrt 24.10/25.12, fw4/nftables, and dnsmasq `nftset`.
-- Added `apk` support for OpenWrt 25.12 while keeping `opkg` support for 24.10/23.05.
+- Updated for OpenWrt-like firmware with fw4/nftables and dnsmasq `nftset`: OpenWrt, ImmortalWrt, X-Wrt, and compatible builds.
+- Added automatic `apk`/`opkg` handling: OpenWrt 25.12+ commonly uses `apk`, while many forks and 23/24 branches still use `opkg`.
 - Tunnel handling refreshed for WireGuard, AmneziaWG, OpenVPN/tun0, Sing-box/tun0, and tun2socks/tun0.
 
 Install:
@@ -61,12 +61,48 @@ sh getdomains-uninstall.sh --purge
 
 
 
+## OpenWrt-like firmware compatibility
+
+The installer is intended to work on official OpenWrt, ImmortalWrt, X-Wrt, and compatible builds if UCI, fw4/firewall4, nftables, and dnsmasq `nftset` support are available. Legacy fw3/iptables setup is not configured by this profile.
+
+The bootstrap now detects `apk` or `opkg`, does not reject forks just because the firmware name differs, retries downloads with `curl -k`/`wget --no-check-certificate`, retries opkg certificate failures with `--no-check-certificate`, and prints a short diagnosis for package errors such as CA/TLS failures, repository signature issues, network/DNS failures, kmod/kernel mismatches, or low flash space.
+
+Strict TLS mode:
+
+```sh
+STRICT_TLS=1 ALLOW_INSECURE_DOWNLOADS=0 sh install.sh
+```
+
+
 ## One-command install
 
 This command downloads the bootstrap installer from your repository `dagmagnat/Routing-OpenWrt`, updates router dependencies, downloads the project, and starts the installer:
 
 ```sh
 cd /tmp && (wget -O install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh || curl -fsSL -o install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh) && sh install.sh
+```
+
+If the firmware has HTTPS/CA certificate issues:
+
+```sh
+cd /tmp
+wget --no-check-certificate -O install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh
+ALLOW_INSECURE_DOWNLOADS=1 sh install.sh
+```
+
+Curl variant:
+
+```sh
+cd /tmp
+curl -k -fsSL -o install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh
+ALLOW_INSECURE_DOWNLOADS=1 sh install.sh
+```
+
+Offline variant: copy the extracted project to the router and run:
+
+```sh
+cd /tmp/Routing-OpenWrt
+sh getdomains-install.sh
 ```
 
 This command does not download the old upstream project. The upstream repository is mentioned only as attribution in README and `NOTICE.md`.

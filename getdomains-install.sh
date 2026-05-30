@@ -23,6 +23,10 @@ UPDATE_SCRIPT="$BASE_DIR/getdomains-update.sh"
 CONVERTER_SCRIPT="$BASE_DIR/singbox-convert.sh"
 SINGBOX_SOURCE_DIR="$BASE_DIR/singbox"
 PROJECT_RAW_BASE="${PROJECT_RAW_BASE:-https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main}"
+# Default is permissive for OpenWrt forks/old builds with missing or stale CA bundles.
+# Set STRICT_TLS=1 or ALLOW_INSECURE_DOWNLOADS=0 to forbid --no-check-certificate / curl -k fallbacks.
+ALLOW_INSECURE_DOWNLOADS="${ALLOW_INSECURE_DOWNLOADS:-1}"
+STRICT_TLS="${STRICT_TLS:-0}"
 INIT_SCRIPT='/etc/init.d/getdomains'
 TABLE_NAME='vpn'
 TABLE_ID='99'
@@ -87,14 +91,33 @@ read_secret() {
 
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
+insecure_download_allowed() {
+    [ "${STRICT_TLS:-0}" = '1' ] && return 1
+    [ "${ALLOW_INSECURE_DOWNLOADS:-1}" = '1' ]
+}
+
 fetch_url() {
     url="$1"
     out="$2"
+    rm -f "$out" 2>/dev/null || true
+
     if cmd_exists curl; then
-        curl -4 -fsSL --connect-timeout 10 --max-time 40 --retry 2 -o "$out" "$url"
-    else
-        wget -4 -q -T 40 -O "$out" "$url"
+        curl -4 -fsSL --connect-timeout 10 --max-time 40 --retry 2 -o "$out" "$url" && return 0
+        if insecure_download_allowed; then
+            warn "Обычное HTTPS-скачивание через curl не удалось. Пробую curl -k для прошивок без корректных CA-сертификатов."
+            curl -4 -k -fsSL --connect-timeout 10 --max-time 40 --retry 2 -o "$out" "$url" && return 0
+        fi
     fi
+
+    if cmd_exists wget; then
+        wget -4 -q -T 40 -O "$out" "$url" && return 0
+        if insecure_download_allowed; then
+            warn "Обычное HTTPS-скачивание через wget не удалось. Пробую --no-check-certificate."
+            wget --no-check-certificate -4 -q -T 40 -O "$out" "$url" && return 0
+        fi
+    fi
+
+    return 1
 }
 
 pkg_manager() {
@@ -107,14 +130,52 @@ pkg_manager() {
     fi
 }
 
+diagnose_pkg_log() {
+    log_file="$1"
+    [ -s "$log_file" ] || return 0
+    if grep -Eiq 'certificate|SSL|TLS|not trusted|self-signed|verify' "$log_file"; then
+        warn 'Похоже на проблему TLS/CA-сертификатов. Пробую fallback; позже лучше установить ca-bundle/ca-certificates и проверить дату роутера.'
+    fi
+    if grep -Eiq 'Signature check failed|UNTRUSTED|BAD signature|public key|key' "$log_file"; then
+        warn 'Похоже на проблему подписи/ключей репозитория. Часто это несовпадение прошивки и feeds или устаревший snapshot.'
+    fi
+    if grep -Eiq 'Failed to send request|Network unreachable|bad address|Could not resolve|Temporary failure|Connection timed out' "$log_file"; then
+        warn 'Похоже на проблему сети/DNS до репозитория. Проверьте WAN, DNS и дату/время на роутере.'
+    fi
+    if grep -Eiq 'kernel|kmod|incompatible|cannot satisfy|unsatisfiable' "$log_file"; then
+        warn 'Похоже на несовпадение kmod-пакетов с ядром. Для snapshot/форков обычно нужен свежий sysupgrade той же сборки.'
+    fi
+    if grep -Eiq 'No space left|not enough space|Cannot allocate' "$log_file"; then
+        warn 'Похоже на нехватку места во flash/overlay. Удалите лишние пакеты или используйте firmware с нужными пакетами внутри образа.'
+    fi
+}
+
 pkg_update() {
     pm="$(pkg_manager)"
+    log_file='/tmp/domain-routing-pkg-update.log'
     if [ "$pm" = 'apk' ]; then
-        apk update
+        apk update >"$log_file" 2>&1 && return 0
+        diagnose_pkg_log "$log_file"
+        if insecure_download_allowed; then
+            warn 'Повторяю apk update с --no-check-certificate/--allow-untrusted, если эти ключи поддерживаются сборкой.'
+            apk update --no-check-certificate >>"$log_file" 2>&1 && return 0
+            apk update --allow-untrusted >>"$log_file" 2>&1 && return 0
+        fi
+        cat "$log_file" >&2 2>/dev/null || true
+        return 1
     elif [ "$pm" = 'opkg' ]; then
-        opkg update
+        opkg update >"$log_file" 2>&1 && return 0
+        diagnose_pkg_log "$log_file"
+        if insecure_download_allowed; then
+            warn 'Повторяю opkg update с --no-check-certificate.'
+            opkg update --no-check-certificate >>"$log_file" 2>&1 && return 0
+            opkg --no-check-certificate update >>"$log_file" 2>&1 && return 0
+        fi
+        cat "$log_file" >&2 2>/dev/null || true
+        return 1
     else
-        die 'Не найден ни apk, ни opkg'
+        warn 'Не найден ни apk, ни opkg. Автоустановка пакетов невозможна.'
+        return 1
     fi
 }
 
@@ -139,13 +200,58 @@ pkg_install() {
 
     pm="$(pkg_manager)"
     log "Устанавливаю пакет: $package"
+    log_file="/tmp/domain-routing-pkg-install-$package.log"
     if [ "$pm" = 'apk' ]; then
-        apk add "$package"
+        apk add "$package" >"$log_file" 2>&1 && return 0
+        diagnose_pkg_log "$log_file"
+        if insecure_download_allowed; then
+            apk add --no-check-certificate "$package" >>"$log_file" 2>&1 && return 0
+            apk add --allow-untrusted "$package" >>"$log_file" 2>&1 && return 0
+        fi
+        cat "$log_file" >&2 2>/dev/null || true
+        return 1
     elif [ "$pm" = 'opkg' ]; then
-        opkg install "$package"
+        opkg install "$package" >"$log_file" 2>&1 && return 0
+        diagnose_pkg_log "$log_file"
+        if insecure_download_allowed; then
+            opkg install --no-check-certificate "$package" >>"$log_file" 2>&1 && return 0
+            opkg --no-check-certificate install "$package" >>"$log_file" 2>&1 && return 0
+        fi
+        cat "$log_file" >&2 2>/dev/null || true
+        return 1
     else
-        die 'Не найден ни apk, ни opkg'
+        warn 'Не найден ни apk, ни opkg. Автоустановка пакетов невозможна.'
+        return 1
     fi
+}
+
+pkg_install_any() {
+    for package in "$@"; do
+        [ -n "$package" ] || continue
+        pkg_install "$package" && return 0
+    done
+    return 1
+}
+
+pkg_download() {
+    package="$1"
+    pm="$(pkg_manager)"
+    log_file="/tmp/domain-routing-pkg-download-$package.log"
+    if [ "$pm" = 'opkg' ]; then
+        opkg download "$package" >"$log_file" 2>&1 && return 0
+        diagnose_pkg_log "$log_file"
+        if insecure_download_allowed; then
+            opkg download --no-check-certificate "$package" >>"$log_file" 2>&1 && return 0
+            opkg --no-check-certificate download "$package" >>"$log_file" 2>&1 && return 0
+        fi
+        cat "$log_file" >&2 2>/dev/null || true
+    fi
+    return 1
+}
+
+dnsmasq_supports_nftset() {
+    cmd_exists dnsmasq || return 1
+    dnsmasq --help 2>/dev/null | grep -Eq 'nftset|connmark-allowlist'
 }
 
 install_dnsmasq_full() {
@@ -153,45 +259,82 @@ install_dnsmasq_full() {
         log 'dnsmasq-full уже установлен'
         return 0
     fi
+    if dnsmasq_supports_nftset; then
+        log 'Текущий dnsmasq уже поддерживает nftset, замену на dnsmasq-full пропускаю.'
+        return 0
+    fi
 
     pm="$(pkg_manager)"
     if [ "$pm" = 'apk' ]; then
         log 'Устанавливаю dnsmasq-full через apk'
-        apk add dnsmasq-full || die 'Не удалось установить dnsmasq-full'
-    else
+        pkg_install dnsmasq-full || { warn 'Не удалось установить dnsmasq-full через apk.'; return 1; }
+    elif [ "$pm" = 'opkg' ]; then
         log 'Устанавливаю dnsmasq-full через opkg'
-        opkg update || die 'opkg update завершился с ошибкой'
-        cd /tmp || die 'Не удалось перейти в /tmp'
+        pkg_update || warn 'opkg update завершился с ошибкой, пробую продолжить с текущими индексами.'
+        cd /tmp || { warn 'Не удалось перейти в /tmp'; return 1; }
         rm -f /tmp/dnsmasq-full*.ipk
-        opkg download dnsmasq-full || die 'Не удалось скачать dnsmasq-full'
-        opkg remove dnsmasq >/dev/null 2>&1 || true
-        opkg install /tmp/dnsmasq-full*.ipk || opkg install dnsmasq-full || die 'Не удалось установить dnsmasq-full'
+        if pkg_download dnsmasq-full; then
+            opkg remove dnsmasq >/dev/null 2>&1 || true
+            if ! opkg install /tmp/dnsmasq-full*.ipk >/tmp/domain-routing-dnsmasq-full-install.log 2>&1; then
+                diagnose_pkg_log /tmp/domain-routing-dnsmasq-full-install.log
+                pkg_install dnsmasq-full || { warn 'Не удалось установить dnsmasq-full.'; return 1; }
+            fi
+        else
+            warn 'Не удалось скачать dnsmasq-full отдельным ipk, пробую обычную установку.'
+            pkg_install dnsmasq-full || { warn 'Не удалось установить dnsmasq-full.'; return 1; }
+        fi
         if [ -f /etc/config/dhcp-opkg ]; then
             warn 'opkg создал /etc/config/dhcp-opkg. Текущий /etc/config/dhcp не перезаписываю.'
             warn 'Это нормально: OpenWrt сохранил ваши текущие настройки DHCP/DNS.'
         fi
+    else
+        warn 'Не найден пакетный менеджер apk/opkg. Установите dnsmasq-full вручную.'
+        return 1
     fi
+
+    if dnsmasq_supports_nftset; then
+        log 'dnsmasq nftset support найден.'
+        return 0
+    fi
+
+    warn 'dnsmasq-full установлен/проверен, но nftset support не обнаружен. Маршрутизация по доменам может не работать на этой сборке.'
+    return 1
 }
 
 check_system() {
-    [ -r /etc/os-release ] || die '/etc/os-release не найден. Этот скрипт предназначен для OpenWrt.'
-    . /etc/os-release
-    version_id="${VERSION_ID:-0}"
+    version_id='0'
+    pretty='OpenWrt-like firmware'
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release
+        version_id="${VERSION_ID:-0}"
+        pretty="${PRETTY_NAME:-${NAME:-OpenWrt-like} ${VERSION_ID:-}}"
+    elif [ -r /etc/openwrt_release ]; then
+        . /etc/openwrt_release
+        version_id="${DISTRIB_RELEASE:-0}"
+        pretty="${DISTRIB_DESCRIPTION:-OpenWrt-like firmware}"
+    else
+        warn '/etc/os-release и /etc/openwrt_release не найдены. Продолжаю как на OpenWrt-like системе.'
+    fi
+
     major="${version_id%%.*}"
-    [ -n "$major" ] || major=0
+    case "$major" in ''|*[!0-9]*) major=0 ;; esac
 
     model='unknown'
     [ -r /tmp/sysinfo/model ] && model="$(cat /tmp/sysinfo/model)"
-    printf "$BLUE%s$NC\n" "Модель: $model"
-    printf "$BLUE%s$NC\n" "OpenWrt: ${OPENWRT_RELEASE:-$version_id}"
+    printf "%b%s%b\n" "$BLUE" "Модель: $model" "$NC"
+    printf "%b%s%b\n" "$BLUE" "Прошивка: $pretty" "$NC"
+    printf "%b%s%b\n" "$BLUE" "Пакетный менеджер: $(pkg_manager)" "$NC"
 
-    case "$major" in
-        23|24|25) : ;;
-        *) die 'Поддерживаются OpenWrt 23.05, 24.10 и 25.12. Основная цель проекта — 24/25.' ;;
-    esac
-
-    if [ "$major" -lt 22 ]; then
-        die 'Режим fw4/nftables требует OpenWrt 22.03 или новее.'
+    cmd_exists uci || die 'Не найден uci. Скрипт рассчитан на OpenWrt/ImmortalWrt/X-Wrt-подобные прошивки с UCI.'
+    if [ "$major" -gt 0 ] && [ "$major" -lt 22 ]; then
+        die 'Режим fw4/nftables требует OpenWrt 22.03+ или совместимую сборку с firewall4.'
+    fi
+    if ! cmd_exists nft; then
+        warn 'Команда nft не найдена. Попробую установить nftables, но без nftables маршрутные set-ы не заработают.'
+        pkg_install nftables || true
+    fi
+    if [ ! -x /sbin/fw4 ] && [ ! -x /usr/sbin/fw4 ] && ! uci -q show firewall | grep -q "defaults.*fw4"; then
+        warn 'fw4/firewall4 явно не найден. Скрипт продолжит установку, но старый fw3/iptables не поддерживается этим профилем.'
     fi
 }
 
@@ -333,6 +476,10 @@ REMOTE_DOMAINS_URL="$REMOTE_DOMAINS_URL"
 # Optional remote IPv4/CIDR raw lists, separated by spaces.
 # Example: REMOTE_IP_URLS="https://example.com/telegram.lst https://example.com/whatsapp.lst"
 REMOTE_IP_URLS=""
+
+# Download/package fallback options for OpenWrt forks with missing/stale CA certificates.
+ALLOW_INSECURE_DOWNLOADS="${ALLOW_INSECURE_DOWNLOADS:-1}"
+STRICT_TLS="${STRICT_TLS:-0}"
 
 # Reliability options for domain-based routing.
 # DNS interception is important because dnsmasq.nftset only works when clients resolve names through this router.
@@ -1288,14 +1435,33 @@ warn() { printf 'WARNING: %s\n' "$*" >&2; }
 
 cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
+insecure_download_allowed() {
+    [ "${STRICT_TLS:-0}" = '1' ] && return 1
+    [ "${ALLOW_INSECURE_DOWNLOADS:-1}" = '1' ]
+}
+
 fetch_url() {
     url="$1"
     out="$2"
+    rm -f "$out" 2>/dev/null || true
+
     if cmd_exists curl; then
-        curl -4 -fsSL --connect-timeout 10 --max-time 50 --retry 2 -o "$out" "$url"
-    else
-        wget -4 -q -T 50 -O "$out" "$url"
+        curl -4 -fsSL --connect-timeout 10 --max-time 50 --retry 2 -o "$out" "$url" && return 0
+        if insecure_download_allowed; then
+            warn "curl failed, retrying with curl -k: $url"
+            curl -4 -k -fsSL --connect-timeout 10 --max-time 50 --retry 2 -o "$out" "$url" && return 0
+        fi
     fi
+
+    if cmd_exists wget; then
+        wget -4 -q -T 50 -O "$out" "$url" && return 0
+        if insecure_download_allowed; then
+            warn "wget failed, retrying with --no-check-certificate: $url"
+            wget --no-check-certificate -4 -q -T 50 -O "$out" "$url" && return 0
+        fi
+    fi
+
+    return 1
 }
 
 trim_line() {
@@ -1577,12 +1743,13 @@ ensure_cron() {
 }
 
 install_base_packages() {
-    pkg_update
+    pkg_update || warn 'Индексы пакетов не обновились. Продолжаю с текущими индексами и уже установленными пакетами.'
     # Не ставим curl принудительно: на маленьких роутерах 16 МБ flash важен каждый мегабайт.
     # fetch_url умеет работать через встроенный wget; curl ставим только если пользователь выберет сценарий, где он реально нужен.
-    pkg_install ca-bundle || true
-    pkg_install ip-full || true
-    install_dnsmasq_full
+    pkg_install_any ca-bundle ca-certificates || warn 'CA bundle не установлен автоматически. HTTPS fallback останется включённым.'
+    pkg_install_any libustream-mbedtls libustream-openssl || true
+    pkg_install ip-full || warn 'ip-full не установлен автоматически. Если ip rule/route работают через busybox/ip-tiny, можно продолжать; иначе установите ip-full вручную.'
+    install_dnsmasq_full || warn 'dnsmasq-full/nftset не подтверждён. Базовая установка продолжится, но доменная маршрутизация может не заработать до установки dnsmasq-full.'
 }
 
 select_initial_options() {

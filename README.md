@@ -1,8 +1,8 @@
-# Domain routing OpenWrt 24/25
+# Domain routing для OpenWrt / ImmortalWrt / X-Wrt
 
 > За основу взято отсюда: [itdoginfo/domain-routing-openwrt](https://github.com/itdoginfo/domain-routing-openwrt).
 >
-> Эта версия — не оригинальный проект, а переработанная maintenance-версия под OpenWrt 24.10/25.12 с исправлениями хранения списков, обновления, fw4/nftables и ручного управления доменами/IP.
+> Эта версия — не оригинальный проект, а переработанная maintenance-версия под OpenWrt‑подобные прошивки с fw4/nftables: OpenWrt, ImmortalWrt, X-Wrt и совместимые сборки.
 
 Главное изменение: доменные и IP-списки больше не живут только в `/tmp`. Генерация перенесена в постоянную директорию `/etc/domain-routing`, а в `/tmp` пишется только временная проверка. Если GitHub или внешний список временно недоступны, последняя валидная конфигурация dnsmasq не затирается.
 
@@ -12,19 +12,38 @@
 - Генерируемый dnsmasq-файл теперь `/etc/dnsmasq.d/90-domain-routing.conf`.
 - Добавлены ручные списки: `/etc/domain-routing/domains/*.lst` и `/etc/domain-routing/ips/*.lst`.
 - Добавлены таймауты, lock и fallback на последнюю валидную remote-конфигурацию.
-- Обновлена логика под OpenWrt 24.10/25.12, fw4/nftables и dnsmasq `nftset`.
-- Добавлена совместимость с `apk` в OpenWrt 25.12 и сохранена совместимость с `opkg` в 24.10/23.05.
+- Обновлена логика под OpenWrt‑подобные прошивки с fw4/nftables и dnsmasq `nftset`: OpenWrt, ImmortalWrt, X-Wrt и совместимые сборки.
+- Добавлена автоадаптация под `apk` и `opkg`: OpenWrt 25.12+ обычно использует `apk`, многие форки и ветки 23/24 используют `opkg`.
 - Обновлена поддержка туннелей: WireGuard, AmneziaWG, OpenVPN/tun0, Sing-box/tun0, tun2socks/tun0.
 - Интерактивный установщик стал безопаснее: в меню есть `0` для возврата и `q` для остановки, а ошибки импорта WG/AWG/Sing-box больше не обрывают весь мастер.
 
 ## Что делает проект
 
 - Маршрутизирует выбранные домены через отдельную таблицу `vpn` по fwmark `0x1`.
-- Использует `dnsmasq-full` + `nftset` + `fw4/nftables` для OpenWrt 24/25.
+- Использует `dnsmasq-full` + `nftset` + `fw4/nftables` для OpenWrt‑подобных сборок с firewall4.
 - Поддерживает локальные ручные списки доменов и IPv4/CIDR.
 - Может дополнительно подтягивать удалённый dnsmasq/nftset-список.
 - Поддерживает WireGuard, AmneziaWG, OpenVPN/tun0, Sing-box/tun0 и tun2socks/tun0.
 - Для IP-списков использует persistent `loadfile`: `/etc/domain-routing/generated/vpn_ip.lst`.
+
+
+## Совместимость с OpenWrt‑подобными прошивками
+
+Цель проекта — работать не только на официальном OpenWrt, но и на ImmortalWrt, X-Wrt и других сборках, если в них есть UCI, fw4/firewall4, nftables и `dnsmasq` с поддержкой `nftset`. Старый fw3/iptables-профиль этим установщиком не настраивается.
+
+Установщик теперь делает так:
+
+- определяет `apk` или `opkg` автоматически;
+- не отсекает X-Wrt/ImmortalWrt только из-за другого имени прошивки;
+- при ошибке TLS/сертификатов пробует `curl -k`, `wget --no-check-certificate`, `opkg ... --no-check-certificate`;
+- пишет краткую диагностику причины: сертификаты, подписи репозитория, сеть/DNS, несовпадение kmod с ядром, нехватка места;
+- если `dnsmasq-full` не установился, не ломает установку целиком, но предупреждает, что доменная маршрутизация заработает только после появления `nftset` support.
+
+По умолчанию fallback без проверки сертификата включён, потому что на старых/кастомных сборках часто нет нормального CA bundle. Для строгого режима запускайте так:
+
+```sh
+STRICT_TLS=1 ALLOW_INSECURE_DOWNLOADS=0 sh install.sh
+```
 
 
 
@@ -34,6 +53,29 @@
 
 ```sh
 cd /tmp && (wget -O install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh || curl -fsSL -o install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh) && sh install.sh
+```
+
+Если на X-Wrt/старой сборке есть ошибка сертификатов при скачивании:
+
+```sh
+cd /tmp
+wget --no-check-certificate -O install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh
+ALLOW_INSECURE_DOWNLOADS=1 sh install.sh
+```
+
+То же через `curl`:
+
+```sh
+cd /tmp
+curl -k -fsSL -o install.sh https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main/install.sh
+ALLOW_INSECURE_DOWNLOADS=1 sh install.sh
+```
+
+Оффлайн-вариант, если у роутера нет нормального доступа к GitHub: скачайте ZIP на компьютер, распакуйте и передайте папку на роутер через `scp`/WinSCP, затем:
+
+```sh
+cd /tmp/Routing-OpenWrt
+sh getdomains-install.sh
 ```
 
 В этой команде нет скачивания старого оригинального проекта. Оригинальный репозиторий указан только как атрибуция в начале README и в `NOTICE.md`.
@@ -98,6 +140,26 @@ sh getdomains-install.sh
 /etc/init.d/getdomains start
 /etc/init.d/getdomains status
 ```
+
+
+## Если установка пакетов не проходит
+
+Установщик сохраняет последние логи сюда:
+
+```sh
+/tmp/domain-routing-pkg-update.log
+/tmp/domain-routing-pkg-install-ИМЯ_ПАКЕТА.log
+```
+
+Типовые причины:
+
+- `certificate`, `SSL verify`, `self-signed`, `not trusted` — нет CA bundle, неправильная дата или TLS-проблема сборки. Скрипт попробует fallback; после установки лучше поставить `ca-bundle`/`ca-certificates` и синхронизировать время.
+- `Signature check failed`, `UNTRUSTED`, `public key` — проблема ключей или feeds не соответствуют прошивке. Лучше обновить прошивку/sysupgrade или исправить репозитории.
+- `kernel`, `kmod`, `cannot satisfy dependencies` — пакет ядра не совпадает с текущим kernel. Часто бывает на snapshot/форках после обновления feeds. Нужна та же версия сборки или sysupgrade.
+- `No space left` — не хватает flash/overlay. Для маленьких роутеров лучше собрать firmware уже с нужными пакетами.
+- `Could not resolve`, `Network unreachable`, `Failed to send request` — проблема WAN/DNS на самом роутере.
+
+Не запускайте массовое `opkg upgrade`/`apk upgrade` на роутере ради этого проекта: на OpenWrt‑подобных системах это часто ломает kmod/ядро. Лучше ставить только нужные пакеты или обновлять firmware целиком через sysupgrade.
 
 
 ## AmneziaWG: вставка готового конфига
