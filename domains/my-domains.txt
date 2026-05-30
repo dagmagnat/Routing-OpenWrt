@@ -74,7 +74,7 @@ discord.new
 discord.st
 discord.store
 discord.tools
-discordInvites.net
+discordinvites.net
 discordactivities.com
 discordapp.com
 discordapp.io
@@ -114,7 +114,7 @@ femeretes.org
 filmitorrent.net
 filmix.biz
 filmix.fm
-findAdiscord.com
+findadiscord.com
 fragment.com
 freetp.org
 gethornet.com
