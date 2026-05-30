@@ -23,6 +23,8 @@ UPDATE_SCRIPT="$BASE_DIR/getdomains-update.sh"
 CONVERTER_SCRIPT="$BASE_DIR/singbox-convert.sh"
 SINGBOX_SOURCE_DIR="$BASE_DIR/singbox"
 PROJECT_RAW_BASE="${PROJECT_RAW_BASE:-https://raw.githubusercontent.com/dagmagnat/Routing-OpenWrt/main}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P || pwd)"
+PROJECT_LIST_DIR="${PROJECT_LIST_DIR:-$SCRIPT_DIR/domains}"
 # Default is permissive for OpenWrt forks/old builds with missing or stale CA bundles.
 # Set STRICT_TLS=1 or ALLOW_INSECURE_DOWNLOADS=0 to forbid --no-check-certificate / curl -k fallbacks.
 ALLOW_INSECURE_DOWNLOADS="${ALLOW_INSECURE_DOWNLOADS:-1}"
@@ -342,7 +344,36 @@ ensure_directories() {
     mkdir -p "$BASE_DIR" "$DOMAINS_DIR" "$IPS_DIR" "$GEN_DIR" "$DNSMASQ_DIR" /etc/hotplug.d/iface /etc/hotplug.d/net /etc/iproute2
 }
 
+copy_bundled_lists() {
+    src_dir="${PROJECT_LIST_DIR:-}"
+    [ -n "$src_dir" ] || return 0
+    [ -d "$src_dir" ] || return 0
+
+    copied_domains='0'
+    copied_ips='0'
+    for src_file in "$src_dir"/*.lst; do
+        [ -f "$src_file" ] || continue
+        base="$(basename "$src_file")"
+        first_data_line="$(sed -n '/^[[:space:]]*#/d;/^[[:space:]]*$/d;{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}' "$src_file" 2>/dev/null || true)"
+        if printf '%s\n' "$base $first_data_line" | grep -Eiq '(^|[ _.-])ip([ _.-]|$)|^[^ ]* [0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'; then
+            dst_file="$IPS_DIR/$base"
+            if [ ! -f "$dst_file" ]; then
+                cp "$src_file" "$dst_file" && copied_ips='1'
+            fi
+        else
+            dst_file="$DOMAINS_DIR/$base"
+            if [ ! -f "$dst_file" ]; then
+                cp "$src_file" "$dst_file" && copied_domains='1'
+            fi
+        fi
+    done
+    [ "$copied_domains" = '1' ] && log "Скопированы локальные доменные списки из $src_dir в $DOMAINS_DIR"
+    [ "$copied_ips" = '1' ] && log "Скопированы локальные IPv4/CIDR списки из $src_dir в $IPS_DIR"
+}
+
 seed_lists() {
+    copy_bundled_lists
+
     if [ ! -f "$DOMAINS_DIR/10-youtube.lst" ]; then
         cat > "$DOMAINS_DIR/10-youtube.lst" <<'LIST'
 # One domain per line. Subdomains are matched automatically by dnsmasq.
@@ -779,14 +810,14 @@ set_network_opt() {
     # DNS from provider client configs is intentionally ignored by default.
     # Domain routing through dnsmasq/nftset is reliable only when LAN clients resolve via the router.
     if [ "$option" = 'dns' ] && [ "${USE_TUNNEL_DNS:-0}" != '1' ]; then
-        uci -q delete network.$section.$option >/dev/null 2>&1 || true
+        uci -q delete "network.$section.$option" >/dev/null 2>&1 || true
         return 0
     fi
 
     if [ -n "$value" ]; then
         uci set network.$section.$option="$value"
     else
-        uci -q delete network.$section.$option >/dev/null 2>&1 || true
+        uci -q delete "network.$section.$option" >/dev/null 2>&1 || true
     fi
 }
 
@@ -796,6 +827,34 @@ trim_string() {
 
 normalize_list_value() {
     printf '%s' "$1" | sed 's/,/ /g;s/[[:space:]][[:space:]]*/ /g;s/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+set_network_list() {
+    section="$1"
+    option="$2"
+    values="$(normalize_list_value "$3")"
+    uci -q delete "network.$section.$option" >/dev/null 2>&1 || true
+    [ -n "$values" ] || return 0
+    for item in $values; do
+        uci add_list "network.$section.$option=$item" || return 1
+    done
+}
+
+any_nonempty() {
+    for value in "$@"; do
+        [ -n "$value" ] && return 0
+    done
+    return 1
+}
+
+awg_proto_supports_i_packets() {
+    # AWG 2.0 configs may contain I1-I5/CPS packets. Older OpenWrt proto scripts
+    # commonly expose only S1/S2/J*/H1-H4, so the interface can stay at zero traffic.
+    for f in /lib/netifd/proto/amneziawg.sh /usr/lib/netifd/proto/amneziawg.sh /usr/share/rpcd/acl.d/luci-proto-amneziawg.json; do
+        [ -r "$f" ] || continue
+        grep -Eq 'awg_i[1-5]|[^a-zA-Z0-9_]i[1-5][^a-zA-Z0-9_]' "$f" && return 0
+    done
+    return 1
 }
 
 read_multiline_config() {
@@ -809,14 +868,21 @@ read_multiline_config() {
     got_end='0'
     got_content='0'
     while IFS= read -r line; do
-        if [ "$line" = 'END' ]; then
-            got_end='1'
-            break
-        fi
-        if [ "$got_content" = '0' ] && is_back_choice "$line"; then
+        trimmed_line="$(trim_string "$line")"
+        case "$trimmed_line" in
+            END|END\ *|END\#*|END\;*|END-*)
+                got_end='1'
+                break
+                ;;
+            '```'*)
+                # Tolerate copying from Markdown/code fences.
+                continue
+                ;;
+        esac
+        if [ "$got_content" = '0' ] && is_back_choice "$trimmed_line"; then
             return "$BACK_RC"
         fi
-        if [ "$got_content" = '0' ] && is_stop_choice "$line"; then
+        if [ "$got_content" = '0' ] && is_stop_choice "$trimmed_line"; then
             return "$STOP_RC"
         fi
         [ -n "$line" ] && got_content='1'
@@ -946,11 +1012,15 @@ apply_wg_config_file() {
     if [ -z "$address" ]; then input_error 'В конфиге не найден Address в секции [Interface].'; return 1; fi
     if [ -z "$public_key" ]; then input_error 'В конфиге не найден PublicKey в секции [Peer].'; return 1; fi
     if [ -z "$endpoint" ]; then warn 'В конфиге не найден Endpoint. Интерфейс будет создан, но туннель может не подняться без endpoint_host/endpoint_port.'; fi
+    if [ "$peer_type" = 'awg' ] && any_nonempty "$awg_i1" "$awg_i2" "$awg_i3" "$awg_i4" "$awg_i5" && ! awg_proto_supports_i_packets; then
+        warn 'В конфиге есть I1-I5/CPS параметры AmneziaWG 2.0, но установленный proto-скрипт OpenWrt, похоже, их не поддерживает.'
+        warn 'Если latest handshake/traffic останется 0, установите AWG 2.0 пакеты под вашу версию/архитектуру или используйте конфиг без I1-I5.'
+    fi
 
     uci set network.$iface=interface || return 1
     uci set network.$iface.proto="$proto" || return 1
     uci set network.$iface.private_key="$private_key" || return 1
-    uci set network.$iface.addresses="$address" || return 1
+    set_network_list "$iface" addresses "$address" || return 1
     set_network_opt "$iface" listen_port "$listen_port" || return 1
     set_network_opt "$iface" dns "$dns" || return 1
 
@@ -979,7 +1049,7 @@ apply_wg_config_file() {
     uci set network.@$peer_section[0].public_key="$public_key" || return 1
     set_network_opt "@$peer_section[0]" preshared_key "$preshared_key" || return 1
     uci set network.@$peer_section[0].route_allowed_ips='0' || return 1
-    uci set network.@$peer_section[0].allowed_ips="$allowed_ips" || return 1
+    set_network_list "@$peer_section[0]" allowed_ips "$allowed_ips" || return 1
     set_network_opt "@$peer_section[0]" persistent_keepalive "$persistent_keepalive" || return 1
     if [ -n "$endpoint" ]; then
         parse_endpoint_value "$endpoint"
@@ -1058,6 +1128,11 @@ configure_wg_manual() {
     allowed_ips="$(read_default 'Введите AllowedIPs' '0.0.0.0/0')"
     persistent_keepalive="$(read_default 'Введите PersistentKeepalive' '25')"
 
+    if [ "$peer_type" = 'awg' ] && any_nonempty "$awg_i1" "$awg_i2" "$awg_i3" "$awg_i4" "$awg_i5" && ! awg_proto_supports_i_packets; then
+        warn 'Вы ввели I1-I5/CPS параметры AmneziaWG 2.0, но установленный proto-скрипт OpenWrt, похоже, их не поддерживает.'
+        warn 'Если latest handshake/traffic останется 0, установите AWG 2.0 пакеты под вашу версию/архитектуру или используйте конфиг без I1-I5.'
+    fi
+
     if [ -z "$private_key" ]; then input_error 'PrivateKey пустой. Конфиг не применён.'; return 1; fi
     if [ -z "$address" ]; then input_error 'Address пустой. Конфиг не применён.'; return 1; fi
     if [ -z "$public_key" ]; then input_error 'PublicKey пустой. Конфиг не применён.'; return 1; fi
@@ -1066,7 +1141,7 @@ configure_wg_manual() {
     uci set network.$iface=interface || return 1
     uci set network.$iface.proto="$proto" || return 1
     uci set network.$iface.private_key="$private_key" || return 1
-    uci set network.$iface.addresses="$(normalize_list_value "$address")" || return 1
+    set_network_list "$iface" addresses "$address" || return 1
     uci set network.$iface.listen_port='51820' || return 1
     set_network_opt "$iface" dns "$(normalize_list_value "$dns")" || return 1
 
@@ -1095,7 +1170,7 @@ configure_wg_manual() {
     uci set network.@$peer_section[0].public_key="$public_key" || return 1
     set_network_opt "@$peer_section[0]" preshared_key "$preshared_key" || return 1
     uci set network.@$peer_section[0].route_allowed_ips='0' || return 1
-    uci set network.@$peer_section[0].allowed_ips="$(normalize_list_value "$allowed_ips")" || return 1
+    set_network_list "@$peer_section[0]" allowed_ips "$allowed_ips" || return 1
     set_network_opt "@$peer_section[0]" persistent_keepalive "$persistent_keepalive" || return 1
     set_network_opt "@$peer_section[0]" endpoint_host "$endpoint_host" || return 1
     set_network_opt "@$peer_section[0]" endpoint_port "$endpoint_port" || return 1

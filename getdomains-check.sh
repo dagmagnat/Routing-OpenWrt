@@ -81,6 +81,19 @@ check_file "$CFG_FILE"
 check_file "$DNSMASQ_FILE"
 check_file "$IP_LOAD_FILE"
 
+if [ -d "${DOMAINS_DIR:-/etc/domain-routing/domains}" ]; then
+    echo "Domain list files: $(find "${DOMAINS_DIR:-/etc/domain-routing/domains}" -type f -name '*.lst' 2>/dev/null | wc -l)"
+fi
+if [ -d "${IPS_DIR:-/etc/domain-routing/ips}" ]; then
+    echo "IPv4/CIDR list files: $(find "${IPS_DIR:-/etc/domain-routing/ips}" -type f -name '*.lst' 2>/dev/null | wc -l)"
+fi
+if [ -s "$DNSMASQ_FILE" ]; then
+    echo "Generated domain rules: $(grep -c '^nftset=/' "$DNSMASQ_FILE" 2>/dev/null || echo 0)"
+fi
+if [ -s "$IP_LOAD_FILE" ]; then
+    echo "Generated IPv4/CIDR entries: $(grep -cv '^[[:space:]]*$' "$IP_LOAD_FILE" 2>/dev/null || echo 0)"
+fi
+
 if dnsmasq --conf-file="$DNSMASQ_FILE" --test >/tmp/domain-routing-check-dnsmasq.log 2>&1; then
     echo "$OK dnsmasq generated config syntax"
 else
@@ -128,4 +141,12 @@ if ip route show table vpn >/tmp/domain-routing-table.log 2>&1 && [ -s /tmp/doma
     cat /tmp/domain-routing-table.log
 else
     echo "$WARN vpn route table is empty. Tunnel may be down or skipped."
+fi
+
+if command -v amneziawg >/dev/null 2>&1; then
+    echo 'AmneziaWG status:'
+    amneziawg show 2>/dev/null || echo "$WARN amneziawg show failed"
+elif command -v wg >/dev/null 2>&1; then
+    echo 'WireGuard status:'
+    wg show 2>/dev/null || echo "$WARN wg show failed"
 fi

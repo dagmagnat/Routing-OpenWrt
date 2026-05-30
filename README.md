@@ -196,8 +196,50 @@ I5 = <b ...>
 END
 ```
 
-и нажать Enter.
+и нажать Enter. В новых версиях установщик также терпимо обработает `END # комментарий` или `END - комментарий`, но безопаснее писать просто `END` без лишнего текста.
 
+Важно: bundled-списки из папки `domains/` репозитория автоматически копируются в `/etc/domain-routing/domains` и `/etc/domain-routing/ips` при первом запуске. После ручного изменения списков выполните:
+
+```sh
+/etc/init.d/getdomains restart
+```
+
+Для уже установленной старой версии можно применить быстрый ремонт из полного архива проекта:
+
+```sh
+cd /tmp/Routing-OpenWrt-main  # или в папку, куда распакован архив
+sh repair-current-install.sh
+```
+
+Если вы подключены по SSH и не хотите перезапускать сеть автоматически:
+
+```sh
+NO_NETWORK_RESTART=1 sh repair-current-install.sh
+```
+
+
+## Если счётчики RX/TX или nft-set по нулям
+
+Проверьте по шагам:
+
+```sh
+uci show network.awg0
+uci show network | grep -A20 "amneziawg_awg0"
+amneziawg show 2>/dev/null || wg show
+ip address show awg0
+ip route show table vpn
+/etc/init.d/getdomains restart
+sh getdomains-check.sh
+```
+
+Для AmneziaWG в `/etc/config/network` адрес и `AllowedIPs` должны быть именно list-полями, например:
+
+```text
+list addresses '10.28.8.6/32'
+list allowed_ips '0.0.0.0/0'
+```
+
+Если видите `option addresses` или `option allowed_ips`, перезапустите обновлённый установщик или исправьте интерфейс через LuCI/консоль. Для конфигов AmneziaWG 2.0 с `I1-I5` убедитесь, что установлены AWG 2.0 пакеты и proto-скрипт поддерживает эти параметры; старые пакеты часто поддерживают только `S1/S2/Jc/Jmin/Jmax/H1-H4`.
 
 
 ### DNS из WG/AWG-конфигов
