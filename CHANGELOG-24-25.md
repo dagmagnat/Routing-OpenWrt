@@ -96,3 +96,12 @@
 - Установщик стал легче для роутеров 16 MB flash: `jq` и `curl` больше не ставятся в bootstrap без необходимости.
 - `getdomains-check.sh` теперь проверяет DNS redirect и предупреждает, если IPv6 LAN не отключён.
 - Uninstall удаляет DNS redirect, созданный domain-routing.
+
+## v8 - Safer interactive installer and DNS protection
+
+- Added navigation in the interactive installer: `0` returns to the previous menu where safe, `q` stops the installer cleanly.
+- AmneziaWG/WireGuard import no longer exits the whole installer on malformed pasted config. Missing `END`, empty config, missing `PrivateKey`, `Address` or `PublicKey` now keeps the user inside the tunnel setup menu.
+- Manual WG/AWG setup validates required fields before applying UCI changes, so a half-entered peer is less likely to be committed.
+- DNS from WireGuard/AmneziaWG client configs is ignored by default via `USE_TUNNEL_DNS=0`, because provider DNS on the tunnel interface can break dnsmasq/nftset based domain routing.
+- Sing-box converter is installed only when a link/subscription/local conversion is actually selected. Existing `/etc/sing-box/config.json` and placeholder modes no longer fail just because the converter cannot be downloaded.
+- Invalid IPv4/CIDR entries are now checked more strictly: octets must be 0..255 and CIDR mask must be 0..32.

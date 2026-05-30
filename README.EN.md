@@ -104,3 +104,14 @@ Manual usage:
 ```
 
 Output: `/etc/sing-box/config.json`.
+
+
+## Safer interactive installer notes
+
+The installer now supports simple navigation in the main menus: enter `0` to go back where safe, or `q` to stop the installer. WG/AWG pasted config errors and Sing-box conversion errors no longer terminate the whole wizard; the installer returns to the relevant menu so you can retry.
+
+By default, DNS values from WireGuard/AmneziaWG client configs are not imported into the UCI tunnel interface. This is intentional: dnsmasq/nftset domain routing is reliable only when LAN clients resolve names through the router. To opt in manually, edit `/etc/domain-routing/config` and set:
+
+```sh
+USE_TUNNEL_DNS="1"
+```

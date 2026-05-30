@@ -32,11 +32,36 @@ IP_SET='vpn_ip'
 NFT_FAMILY='inet'
 NFT_TABLE='fw4'
 CRON_LINE='17 */8 * * * /etc/init.d/getdomains start >/tmp/getdomains.log 2>&1'
+BACK_RC=97
+STOP_RC=98
 
 log() { printf "$GREEN%s$NC\n" "$*"; }
 warn() { printf "$YELLOW%s$NC\n" "$*"; }
 err() { printf "$RED%s$NC\n" "$*"; }
 die() { err "$*"; exit 1; }
+
+is_back_choice() {
+    case "${1:-}" in
+        0|b|B|back|Back|назад|Назад) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_stop_choice() {
+    case "${1:-}" in
+        q|Q|quit|Quit|exit|Exit|стоп|Стоп|выход|Выход) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+show_nav_hint() {
+    echo 'Навигация: 0 — назад, q — остановить установку без продолжения.'
+}
+
+input_error() {
+    warn "$*"
+    warn 'Исправьте ввод и повторите пункт. Можно ввести 0 для возврата назад.'
+}
 
 read_default() {
     prompt="$1"
@@ -228,47 +253,62 @@ select_domain_source() {
     echo '4) Список Ukraine из itdoginfo/allow-domains'
     echo '5) Свой raw URL со списком dnsmasq/nftset'
     echo '6) Отключить удалённый список'
+    show_nav_hint
     echo
     echo 'Нажмите Enter для варианта 1.'
     while true; do
         printf 'Ваш выбор [1]: '
         IFS= read -r choice || choice='1'
+        is_stop_choice "$choice" && return "$STOP_RC"
         case "$choice" in
+            0)
+                warn 'Это первый шаг мастера, возвращаться некуда. Для остановки введите q.'
+                ;;
             ''|1)
                 USE_REMOTE_DOMAINS='0'
                 REMOTE_DOMAINS_URL=''
-                break
+                return 0
                 ;;
             2)
                 USE_REMOTE_DOMAINS='1'
                 REMOTE_DOMAINS_URL='https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-dnsmasq-nfset.lst'
-                break
+                return 0
                 ;;
             3)
                 USE_REMOTE_DOMAINS='1'
                 REMOTE_DOMAINS_URL='https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/outside-dnsmasq-nfset.lst'
-                break
+                return 0
                 ;;
             4)
                 USE_REMOTE_DOMAINS='1'
                 REMOTE_DOMAINS_URL='https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Ukraine/inside-dnsmasq-nfset.lst'
-                break
+                return 0
                 ;;
             5)
-                USE_REMOTE_DOMAINS='1'
-                REMOTE_DOMAINS_URL="$(read_secret 'Вставьте raw URL со списком dnsmasq/nftset:')"
-                break
+                REMOTE_DOMAINS_URL="$(read_secret 'Вставьте raw URL со списком dnsmasq/nftset или 0 для возврата:')"
+                if is_back_choice "$REMOTE_DOMAINS_URL"; then
+                    continue
+                fi
+                is_stop_choice "$REMOTE_DOMAINS_URL" && return "$STOP_RC"
+                case "$REMOTE_DOMAINS_URL" in
+                    http://*|https://*)
+                        USE_REMOTE_DOMAINS='1'
+                        return 0
+                        ;;
+                    *)
+                        input_error 'URL должен начинаться с http:// или https://.'
+                        ;;
+                esac
                 ;;
             6)
                 USE_REMOTE_DOMAINS='0'
                 REMOTE_DOMAINS_URL=''
-                break
+                return 0
                 ;;
-            *) echo 'Введите число от 1 до 6.' ;;
+            *) echo 'Введите число от 1 до 6, 0 или q.' ;;
         esac
     done
 }
-
 write_config() {
     cat > "$CFG_FILE" <<EOF_CFG
 # Domain routing configuration.
@@ -297,6 +337,9 @@ REMOTE_IP_URLS=""
 # Reliability options for domain-based routing.
 # DNS interception is important because dnsmasq.nftset only works when clients resolve names through this router.
 FORCE_LAN_DNS="${FORCE_LAN_DNS:-1}"
+# By default the installer does not import DNS from WG/AWG client configs, because changing router/interface DNS often breaks domain routing.
+# Set USE_TUNNEL_DNS=1 manually only if you intentionally want the tunnel provider DNS on the interface.
+USE_TUNNEL_DNS="${USE_TUNNEL_DNS:-0}"
 # Most AWG/WG/OpenVPN client configs in this project are IPv4-only. IPv6 can bypass domain routing.
 DISABLE_LAN_IPV6="${DISABLE_LAN_IPV6:-1}"
 EOF_CFG
@@ -478,32 +521,34 @@ select_safety_options() {
     echo '1) Включить перехват DNS на роутер и отключить IPv6 на LAN [рекомендуется для AWG/WG/OpenVPN IPv4]'
     echo '2) Только перехват DNS на роутер, IPv6 не трогать'
     echo '3) Ничего не менять'
+    show_nav_hint
     echo
     echo 'Нажмите Enter для варианта 1.'
     while true; do
         printf 'Ваш выбор [1]: '
         IFS= read -r safety_choice || safety_choice='1'
+        is_back_choice "$safety_choice" && return "$BACK_RC"
+        is_stop_choice "$safety_choice" && return "$STOP_RC"
         case "$safety_choice" in
             ''|1)
                 FORCE_LAN_DNS='1'
                 DISABLE_LAN_IPV6='1'
-                break
+                return 0
                 ;;
             2)
                 FORCE_LAN_DNS='1'
                 DISABLE_LAN_IPV6='0'
-                break
+                return 0
                 ;;
             3)
                 FORCE_LAN_DNS='0'
                 DISABLE_LAN_IPV6='0'
-                break
+                return 0
                 ;;
-            *) echo 'Введите число от 1 до 3.' ;;
+            *) echo 'Введите число от 1 до 3, 0 или q.' ;;
         esac
     done
 }
-
 install_wireguard() {
     pkg_install wireguard-tools
 }
@@ -575,13 +620,22 @@ install_awg_packages() {
         return 0
     fi
 
-    die 'AmneziaWG не установлен. Установите kmod-amneziawg и amneziawg-tools, затем запустите скрипт повторно.'
+    warn 'AmneziaWG не установлен. Установите kmod-amneziawg и amneziawg-tools, затем повторите этот пункт.'
+    return 1
 }
 
 set_network_opt() {
     section="$1"
     option="$2"
     value="$3"
+
+    # DNS from provider client configs is intentionally ignored by default.
+    # Domain routing through dnsmasq/nftset is reliable only when LAN clients resolve via the router.
+    if [ "$option" = 'dns' ] && [ "${USE_TUNNEL_DNS:-0}" != '1' ]; then
+        uci -q delete network.$section.$option >/dev/null 2>&1 || true
+        return 0
+    fi
+
     if [ -n "$value" ]; then
         uci set network.$section.$option="$value"
     else
@@ -599,18 +653,39 @@ normalize_list_value() {
 
 read_multiline_config() {
     out_file="$1"
-    : > "$out_file" || die "Не удалось создать временный файл $out_file"
+    : > "$out_file" || { warn "Не удалось создать временный файл $out_file"; return 1; }
     echo 'Вставьте полный конфиг AmneziaWG/WireGuard начиная с [Interface].'
     echo 'После вставки напишите отдельной строкой END и нажмите Enter.'
+    echo 'До вставки можно ввести 0, чтобы вернуться назад.'
     echo 'Пример окончания:'
     echo 'END'
+    got_end='0'
+    got_content='0'
     while IFS= read -r line; do
-        [ "$line" = 'END' ] && break
+        if [ "$line" = 'END' ]; then
+            got_end='1'
+            break
+        fi
+        if [ "$got_content" = '0' ] && is_back_choice "$line"; then
+            return "$BACK_RC"
+        fi
+        if [ "$got_content" = '0' ] && is_stop_choice "$line"; then
+            return "$STOP_RC"
+        fi
+        [ -n "$line" ] && got_content='1'
         printf '%s\n' "$line" >> "$out_file"
     done
-    [ -s "$out_file" ] || die 'Конфиг пустой, настройка прервана.'
-}
 
+    if [ "$got_end" != '1' ]; then
+        input_error 'Не найден завершающий маркер END. Конфиг не применён.'
+        return 1
+    fi
+    if [ ! -s "$out_file" ]; then
+        input_error 'Конфиг пустой. Настройка не применена.'
+        return 1
+    fi
+    return 0
+}
 parse_endpoint_value() {
     endpoint="$1"
     endpoint_host=''
@@ -720,54 +795,55 @@ apply_wg_config_file() {
         esac
     done < "$config_file"
 
-    [ -n "$private_key" ] || die 'В конфиге не найден PrivateKey в секции [Interface].'
-    [ -n "$address" ] || die 'В конфиге не найден Address в секции [Interface].'
-    [ -n "$public_key" ] || die 'В конфиге не найден PublicKey в секции [Peer].'
+    if [ -z "$private_key" ]; then input_error 'В конфиге не найден PrivateKey в секции [Interface].'; return 1; fi
+    if [ -z "$address" ]; then input_error 'В конфиге не найден Address в секции [Interface].'; return 1; fi
+    if [ -z "$public_key" ]; then input_error 'В конфиге не найден PublicKey в секции [Peer].'; return 1; fi
+    if [ -z "$endpoint" ]; then warn 'В конфиге не найден Endpoint. Интерфейс будет создан, но туннель может не подняться без endpoint_host/endpoint_port.'; fi
 
-    uci set network.$iface=interface
-    uci set network.$iface.proto="$proto"
-    uci set network.$iface.private_key="$private_key"
-    uci set network.$iface.addresses="$address"
-    set_network_opt "$iface" listen_port "$listen_port"
-    set_network_opt "$iface" dns "$dns"
+    uci set network.$iface=interface || return 1
+    uci set network.$iface.proto="$proto" || return 1
+    uci set network.$iface.private_key="$private_key" || return 1
+    uci set network.$iface.addresses="$address" || return 1
+    set_network_opt "$iface" listen_port "$listen_port" || return 1
+    set_network_opt "$iface" dns "$dns" || return 1
 
     if [ "$peer_type" = 'awg' ]; then
-        set_network_opt "$iface" awg_jc "$awg_jc"
-        set_network_opt "$iface" awg_jmin "$awg_jmin"
-        set_network_opt "$iface" awg_jmax "$awg_jmax"
-        set_network_opt "$iface" awg_s1 "$awg_s1"
-        set_network_opt "$iface" awg_s2 "$awg_s2"
-        set_network_opt "$iface" awg_s3 "$awg_s3"
-        set_network_opt "$iface" awg_s4 "$awg_s4"
-        set_network_opt "$iface" awg_h1 "$awg_h1"
-        set_network_opt "$iface" awg_h2 "$awg_h2"
-        set_network_opt "$iface" awg_h3 "$awg_h3"
-        set_network_opt "$iface" awg_h4 "$awg_h4"
-        set_network_opt "$iface" awg_i1 "$awg_i1"
-        set_network_opt "$iface" awg_i2 "$awg_i2"
-        set_network_opt "$iface" awg_i3 "$awg_i3"
-        set_network_opt "$iface" awg_i4 "$awg_i4"
-        set_network_opt "$iface" awg_i5 "$awg_i5"
+        set_network_opt "$iface" awg_jc "$awg_jc" || return 1
+        set_network_opt "$iface" awg_jmin "$awg_jmin" || return 1
+        set_network_opt "$iface" awg_jmax "$awg_jmax" || return 1
+        set_network_opt "$iface" awg_s1 "$awg_s1" || return 1
+        set_network_opt "$iface" awg_s2 "$awg_s2" || return 1
+        set_network_opt "$iface" awg_s3 "$awg_s3" || return 1
+        set_network_opt "$iface" awg_s4 "$awg_s4" || return 1
+        set_network_opt "$iface" awg_h1 "$awg_h1" || return 1
+        set_network_opt "$iface" awg_h2 "$awg_h2" || return 1
+        set_network_opt "$iface" awg_h3 "$awg_h3" || return 1
+        set_network_opt "$iface" awg_h4 "$awg_h4" || return 1
+        set_network_opt "$iface" awg_i1 "$awg_i1" || return 1
+        set_network_opt "$iface" awg_i2 "$awg_i2" || return 1
+        set_network_opt "$iface" awg_i3 "$awg_i3" || return 1
+        set_network_opt "$iface" awg_i4 "$awg_i4" || return 1
+        set_network_opt "$iface" awg_i5 "$awg_i5" || return 1
     fi
 
     reset_peer_sections "$peer_section"
-    uci add network "$peer_section" >/dev/null
-    uci set network.@$peer_section[0].name="${iface}_client"
-    uci set network.@$peer_section[0].public_key="$public_key"
-    set_network_opt "@$peer_section[0]" preshared_key "$preshared_key"
-    uci set network.@$peer_section[0].route_allowed_ips='0'
-    uci set network.@$peer_section[0].allowed_ips="$allowed_ips"
-    set_network_opt "@$peer_section[0]" persistent_keepalive "$persistent_keepalive"
+    uci add network "$peer_section" >/dev/null || return 1
+    uci set network.@$peer_section[0].name="${iface}_client" || return 1
+    uci set network.@$peer_section[0].public_key="$public_key" || return 1
+    set_network_opt "@$peer_section[0]" preshared_key "$preshared_key" || return 1
+    uci set network.@$peer_section[0].route_allowed_ips='0' || return 1
+    uci set network.@$peer_section[0].allowed_ips="$allowed_ips" || return 1
+    set_network_opt "@$peer_section[0]" persistent_keepalive "$persistent_keepalive" || return 1
     if [ -n "$endpoint" ]; then
         parse_endpoint_value "$endpoint"
-        set_network_opt "@$peer_section[0]" endpoint_host "$endpoint_host"
-        set_network_opt "@$peer_section[0]" endpoint_port "$endpoint_port"
+        set_network_opt "@$peer_section[0]" endpoint_host "$endpoint_host" || return 1
+        set_network_opt "@$peer_section[0]" endpoint_port "$endpoint_port" || return 1
     else
         uci -q delete network.@$peer_section[0].endpoint_host >/dev/null 2>&1 || true
         uci -q delete network.@$peer_section[0].endpoint_port >/dev/null 2>&1 || true
     fi
 
-    uci commit network
+    uci commit network || return 1
     log "Конфиг $iface применён через UCI."
 }
 
@@ -778,17 +854,35 @@ configure_wg_manual() {
     peer_section="$4"
 
     echo 'Теперь введите параметры клиента из конфигурации туннеля.'
-    echo 'Подсказки будут отображаться перед каждой строкой ввода.'
-    private_key="$(read_secret 'Введите PrivateKey из секции [Interface]:')"
-    address="$(read_default 'Введите Address с маской, например 10.8.0.2/32 или 192.168.100.5/24' '10.8.0.2/32')"
-    dns="$(read_secret 'Введите DNS из секции [Interface] или оставьте пустым:')"
+    echo 'DNS из клиентского конфига по умолчанию НЕ импортируется, чтобы не ломать dnsmasq/nftset маршрутизацию.'
+    show_nav_hint
 
-    uci set network.$iface=interface
-    uci set network.$iface.proto="$proto"
-    uci set network.$iface.private_key="$private_key"
-    uci set network.$iface.addresses="$(normalize_list_value "$address")"
-    uci set network.$iface.listen_port='51820'
-    set_network_opt "$iface" dns "$(normalize_list_value "$dns")"
+    private_key="$(read_secret 'Введите PrivateKey из секции [Interface] или 0 для возврата:')"
+    is_back_choice "$private_key" && return "$BACK_RC"
+    is_stop_choice "$private_key" && return "$STOP_RC"
+    address="$(read_default 'Введите Address с маской, например 10.8.0.2/32 или 192.168.100.5/24' '10.8.0.2/32')"
+    is_back_choice "$address" && return "$BACK_RC"
+    is_stop_choice "$address" && return "$STOP_RC"
+    dns="$(read_secret 'Введите DNS из секции [Interface] или оставьте пустым:')"
+    is_back_choice "$dns" && return "$BACK_RC"
+    is_stop_choice "$dns" && return "$STOP_RC"
+
+    awg_jc=''
+    awg_jmin=''
+    awg_jmax=''
+    awg_s1=''
+    awg_s2=''
+    awg_s3=''
+    awg_s4=''
+    awg_h1=''
+    awg_h2=''
+    awg_h3=''
+    awg_h4=''
+    awg_i1=''
+    awg_i2=''
+    awg_i3=''
+    awg_i4=''
+    awg_i5=''
 
     if [ "$peer_type" = 'awg' ]; then
         echo 'Введите параметры AmneziaWG. Если параметра нет в конфиге, оставьте пустым.'
@@ -808,22 +902,6 @@ configure_wg_manual() {
         awg_i3="$(read_secret 'Введите I3 полностью, включая <b ...>, или оставьте пустым:')"
         awg_i4="$(read_secret 'Введите I4 полностью, включая <b ...>, или оставьте пустым:')"
         awg_i5="$(read_secret 'Введите I5 полностью, включая <b ...>, или оставьте пустым:')"
-        set_network_opt "$iface" awg_jc "$awg_jc"
-        set_network_opt "$iface" awg_jmin "$awg_jmin"
-        set_network_opt "$iface" awg_jmax "$awg_jmax"
-        set_network_opt "$iface" awg_s1 "$awg_s1"
-        set_network_opt "$iface" awg_s2 "$awg_s2"
-        set_network_opt "$iface" awg_s3 "$awg_s3"
-        set_network_opt "$iface" awg_s4 "$awg_s4"
-        set_network_opt "$iface" awg_h1 "$awg_h1"
-        set_network_opt "$iface" awg_h2 "$awg_h2"
-        set_network_opt "$iface" awg_h3 "$awg_h3"
-        set_network_opt "$iface" awg_h4 "$awg_h4"
-        set_network_opt "$iface" awg_i1 "$awg_i1"
-        set_network_opt "$iface" awg_i2 "$awg_i2"
-        set_network_opt "$iface" awg_i3 "$awg_i3"
-        set_network_opt "$iface" awg_i4 "$awg_i4"
-        set_network_opt "$iface" awg_i5 "$awg_i5"
     fi
 
     public_key="$(read_secret 'Введите PublicKey из секции [Peer]:')"
@@ -833,53 +911,108 @@ configure_wg_manual() {
     allowed_ips="$(read_default 'Введите AllowedIPs' '0.0.0.0/0')"
     persistent_keepalive="$(read_default 'Введите PersistentKeepalive' '25')"
 
-    reset_peer_sections "$peer_section"
-    uci add network "$peer_section" >/dev/null
-    uci set network.@$peer_section[0].name="${iface}_client"
-    uci set network.@$peer_section[0].public_key="$public_key"
-    set_network_opt "@$peer_section[0]" preshared_key "$preshared_key"
-    uci set network.@$peer_section[0].route_allowed_ips='0'
-    uci set network.@$peer_section[0].allowed_ips="$(normalize_list_value "$allowed_ips")"
-    set_network_opt "@$peer_section[0]" persistent_keepalive "$persistent_keepalive"
-    set_network_opt "@$peer_section[0]" endpoint_host "$endpoint_host"
-    set_network_opt "@$peer_section[0]" endpoint_port "$endpoint_port"
-    uci commit network
-}
+    if [ -z "$private_key" ]; then input_error 'PrivateKey пустой. Конфиг не применён.'; return 1; fi
+    if [ -z "$address" ]; then input_error 'Address пустой. Конфиг не применён.'; return 1; fi
+    if [ -z "$public_key" ]; then input_error 'PublicKey пустой. Конфиг не применён.'; return 1; fi
+    if [ -z "$endpoint_host" ]; then input_error 'Endpoint host пустой. Конфиг не применён.'; return 1; fi
 
+    uci set network.$iface=interface || return 1
+    uci set network.$iface.proto="$proto" || return 1
+    uci set network.$iface.private_key="$private_key" || return 1
+    uci set network.$iface.addresses="$(normalize_list_value "$address")" || return 1
+    uci set network.$iface.listen_port='51820' || return 1
+    set_network_opt "$iface" dns "$(normalize_list_value "$dns")" || return 1
+
+    if [ "$peer_type" = 'awg' ]; then
+        set_network_opt "$iface" awg_jc "$awg_jc" || return 1
+        set_network_opt "$iface" awg_jmin "$awg_jmin" || return 1
+        set_network_opt "$iface" awg_jmax "$awg_jmax" || return 1
+        set_network_opt "$iface" awg_s1 "$awg_s1" || return 1
+        set_network_opt "$iface" awg_s2 "$awg_s2" || return 1
+        set_network_opt "$iface" awg_s3 "$awg_s3" || return 1
+        set_network_opt "$iface" awg_s4 "$awg_s4" || return 1
+        set_network_opt "$iface" awg_h1 "$awg_h1" || return 1
+        set_network_opt "$iface" awg_h2 "$awg_h2" || return 1
+        set_network_opt "$iface" awg_h3 "$awg_h3" || return 1
+        set_network_opt "$iface" awg_h4 "$awg_h4" || return 1
+        set_network_opt "$iface" awg_i1 "$awg_i1" || return 1
+        set_network_opt "$iface" awg_i2 "$awg_i2" || return 1
+        set_network_opt "$iface" awg_i3 "$awg_i3" || return 1
+        set_network_opt "$iface" awg_i4 "$awg_i4" || return 1
+        set_network_opt "$iface" awg_i5 "$awg_i5" || return 1
+    fi
+
+    reset_peer_sections "$peer_section"
+    uci add network "$peer_section" >/dev/null || return 1
+    uci set network.@$peer_section[0].name="${iface}_client" || return 1
+    uci set network.@$peer_section[0].public_key="$public_key" || return 1
+    set_network_opt "@$peer_section[0]" preshared_key "$preshared_key" || return 1
+    uci set network.@$peer_section[0].route_allowed_ips='0' || return 1
+    uci set network.@$peer_section[0].allowed_ips="$(normalize_list_value "$allowed_ips")" || return 1
+    set_network_opt "@$peer_section[0]" persistent_keepalive "$persistent_keepalive" || return 1
+    set_network_opt "@$peer_section[0]" endpoint_host "$endpoint_host" || return 1
+    set_network_opt "@$peer_section[0]" endpoint_port "$endpoint_port" || return 1
+    uci commit network || return 1
+    log "Конфиг $iface применён через UCI."
+}
 configure_wg_interface() {
     iface="$1"
     peer_type="$2"
 
     if [ "$peer_type" = 'awg' ]; then
-        install_awg_packages
+        install_awg_packages || return 1
         proto='amneziawg'
         peer_section="amneziawg_$iface"
-        echo 'Выберите способ настройки AmneziaWG:'
-        echo '1) Вставить весь готовый конфиг [Interface]/[Peer] [рекомендуется]'
-        echo '2) Ввести поля вручную'
-        echo
-        echo 'Нажмите Enter для варианта 1.'
-        awg_import_choice="$(read_default 'Ваш выбор' '1')"
-        case "$awg_import_choice" in
-            ''|1)
-                tmp_conf="/tmp/domain-routing-awg-conf.$$"
-                read_multiline_config "$tmp_conf"
-                apply_wg_config_file "$tmp_conf" "$iface" "$peer_type" "$proto" "$peer_section"
-                rm -f "$tmp_conf"
-                return 0
-                ;;
-            *)
-                configure_wg_manual "$iface" "$peer_type" "$proto" "$peer_section"
-                return 0
-                ;;
-        esac
+        while true; do
+            echo 'Выберите способ настройки AmneziaWG:'
+            echo '1) Вставить весь готовый конфиг [Interface]/[Peer] [рекомендуется]'
+            echo '2) Ввести поля вручную'
+            show_nav_hint
+            echo
+            echo 'Нажмите Enter для варианта 1.'
+            awg_import_choice="$(read_default 'Ваш выбор' '1')"
+            is_back_choice "$awg_import_choice" && return "$BACK_RC"
+            is_stop_choice "$awg_import_choice" && return "$STOP_RC"
+            case "$awg_import_choice" in
+                ''|1)
+                    tmp_conf="/tmp/domain-routing-awg-conf.$$"
+                    read_multiline_config "$tmp_conf"
+                    rc=$?
+                    if [ "$rc" -eq "$BACK_RC" ]; then
+                        rm -f "$tmp_conf"
+                        continue
+                    fi
+                    if [ "$rc" -eq "$STOP_RC" ]; then
+                        rm -f "$tmp_conf"
+                        return "$STOP_RC"
+                    fi
+                    if [ "$rc" -ne 0 ]; then
+                        rm -f "$tmp_conf"
+                        continue
+                    fi
+                    if apply_wg_config_file "$tmp_conf" "$iface" "$peer_type" "$proto" "$peer_section"; then
+                        rm -f "$tmp_conf"
+                        return 0
+                    fi
+                    rm -f "$tmp_conf"
+                    ;;
+                2)
+                    configure_wg_manual "$iface" "$peer_type" "$proto" "$peer_section"
+                    rc=$?
+                    [ "$rc" -eq "$BACK_RC" ] && continue
+                    return "$rc"
+                    ;;
+                *) echo 'Введите 1, 2, 0 или q.' ;;
+            esac
+        done
     else
-        install_wireguard
+        install_wireguard || return 1
         proto='wireguard'
         peer_section="wireguard_$iface"
         configure_wg_manual "$iface" "$peer_type" "$proto" "$peer_section"
     fi
 }
+
 install_singbox_converter() {
     mkdir -p "$BASE_DIR" "$SINGBOX_SOURCE_DIR"
 
@@ -942,12 +1075,8 @@ EOF_SB
 }
 
 configure_singbox_template() {
-    pkg_install sing-box || true
-    pkg_install jq || true
-    pkg_install coreutils-base64 || true
     mkdir -p /etc/sing-box "$SINGBOX_SOURCE_DIR"
     [ -f /etc/config/sing-box ] && uci -q set sing-box.main.enabled='1' && uci -q set sing-box.main.user='root' && uci -q commit sing-box
-    install_singbox_converter
 
     echo 'Настройка исходящего подключения Sing-box:'
     echo '1) Вставить одну клиентскую ссылку сейчас: vless://, vmess://, trojan:// или ss:// [рекомендуется для 3X-UI]'
@@ -955,17 +1084,32 @@ configure_singbox_template() {
     echo '3) Конвертировать локальный файл на роутере: ссылка/подписка/full config.json/outbound.json'
     echo '4) Использовать существующий /etc/sing-box/config.json без изменений'
     echo '5) Создать только шаблон /etc/sing-box/config.json'
+    show_nav_hint
     echo
     echo 'Нажмите Enter для варианта 1.'
 
     while true; do
         printf 'Ваш выбор [1]: '
         IFS= read -r sb_choice || sb_choice='1'
+        is_back_choice "$sb_choice" && return "$BACK_RC"
+        is_stop_choice "$sb_choice" && return "$STOP_RC"
         case "$sb_choice" in
             ''|1)
-                link="$(read_secret 'Вставьте proxy-ссылку:')"
+                pkg_install sing-box || true
+                pkg_install jq || true
+                pkg_install coreutils-base64 || true
+                install_singbox_converter || return 1
+                link="$(read_secret 'Вставьте proxy-ссылку или 0 для возврата:')"
+                if is_back_choice "$link"; then
+                    continue
+                fi
+                is_stop_choice "$link" && return "$STOP_RC"
                 if [ -n "$link" ]; then
-                    "$CONVERTER_SCRIPT" --link "$link" || warn 'Конвертация Sing-box не удалась. Старый конфиг сохранён.'
+                    if "$CONVERTER_SCRIPT" --link "$link"; then
+                        break
+                    fi
+                    input_error 'Конвертация Sing-box не удалась. Старый конфиг сохранён.'
+                    continue
                 else
                     warn 'Ссылка пустая; создаю шаблон.'
                     create_singbox_placeholder
@@ -973,9 +1117,21 @@ configure_singbox_template() {
                 break
                 ;;
             2)
-                sub_url="$(read_secret 'Вставьте URL подписки:')"
+                pkg_install sing-box || true
+                pkg_install jq || true
+                pkg_install coreutils-base64 || true
+                install_singbox_converter || return 1
+                sub_url="$(read_secret 'Вставьте URL подписки или 0 для возврата:')"
+                if is_back_choice "$sub_url"; then
+                    continue
+                fi
+                is_stop_choice "$sub_url" && return "$STOP_RC"
                 if [ -n "$sub_url" ]; then
-                    "$CONVERTER_SCRIPT" --url "$sub_url" || warn 'Конвертация подписки не удалась. Старый конфиг сохранён.'
+                    if "$CONVERTER_SCRIPT" --url "$sub_url"; then
+                        break
+                    fi
+                    input_error 'Конвертация подписки не удалась. Старый конфиг сохранён.'
+                    continue
                 else
                     warn 'URL пустой; создаю шаблон.'
                     create_singbox_placeholder
@@ -983,16 +1139,27 @@ configure_singbox_template() {
                 break
                 ;;
             3)
+                pkg_install sing-box || true
+                pkg_install jq || true
+                pkg_install coreutils-base64 || true
+                install_singbox_converter || return 1
                 input_path="$(read_default 'Введите путь к локальному файлу' '/tmp/proxy.txt')"
-                if [ -f "$input_path" ]; then
-                    "$CONVERTER_SCRIPT" --input "$input_path" || warn 'Конвертация локального файла не удалась. Старый конфиг сохранён.'
-                else
-                    warn "Файл не найден: $input_path"
-                    create_singbox_placeholder
+                if is_back_choice "$input_path"; then
+                    continue
                 fi
-                break
+                is_stop_choice "$input_path" && return "$STOP_RC"
+                if [ -f "$input_path" ]; then
+                    if "$CONVERTER_SCRIPT" --input "$input_path"; then
+                        break
+                    fi
+                    input_error 'Конвертация локального файла не удалась. Старый конфиг сохранён.'
+                    continue
+                else
+                    input_error "Файл не найден: $input_path"
+                fi
                 ;;
             4)
+                pkg_install sing-box || true
                 if [ -f /etc/sing-box/config.json ]; then
                     if command -v sing-box >/dev/null 2>&1; then
                         sing-box check -c /etc/sing-box/config.json || warn 'Существующий конфиг Sing-box не прошёл проверку sing-box check.'
@@ -1005,15 +1172,17 @@ configure_singbox_template() {
                 break
                 ;;
             5)
+                pkg_install sing-box || true
                 create_singbox_placeholder
                 break
                 ;;
-            *) echo 'Введите число от 1 до 5.' ;;
+            *) echo 'Введите число от 1 до 5, 0 или q.' ;;
         esac
     done
 
     /etc/init.d/sing-box enable >/dev/null 2>&1 || true
     /etc/init.d/sing-box restart >/dev/null 2>&1 || true
+    return 0
 }
 
 select_tunnel() {
@@ -1024,17 +1193,27 @@ select_tunnel() {
     echo '4) Использовать Sing-box/tun0 (можно вставить ссылку/подписку/JSON)'
     echo '5) Использовать tun2socks/tun0 (настраивается вручную)'
     echo '6) Пропустить настройку туннеля, установить только маршрутизацию и списки'
+    show_nav_hint
     echo
     echo 'Нажмите Enter для варианта 6.'
 
     while true; do
         printf 'Ваш выбор [6]: '
         IFS= read -r choice || choice='6'
+        is_back_choice "$choice" && return "$BACK_RC"
+        is_stop_choice "$choice" && return "$STOP_RC"
         case "$choice" in
             1)
                 TUNNEL='wg'
                 TUN_DEV='wg0'
                 configure_wg_interface 'wg0' 'wg'
+                rc=$?
+                [ "$rc" -eq "$BACK_RC" ] && continue
+                [ "$rc" -eq "$STOP_RC" ] && return "$STOP_RC"
+                if [ "$rc" -ne 0 ]; then
+                    input_error 'WireGuard не настроен. Выберите пункт заново или вернитесь назад.'
+                    continue
+                fi
                 ensure_firewall_zone 'wg' 'wg0' '' 'REJECT'
                 ensure_hotplug_route 'wg0'
                 break
@@ -1043,6 +1222,13 @@ select_tunnel() {
                 TUNNEL='awg'
                 TUN_DEV='awg0'
                 configure_wg_interface 'awg0' 'awg'
+                rc=$?
+                [ "$rc" -eq "$BACK_RC" ] && continue
+                [ "$rc" -eq "$STOP_RC" ] && return "$STOP_RC"
+                if [ "$rc" -ne 0 ]; then
+                    input_error 'AmneziaWG не настроен. Выберите пункт заново или вернитесь назад.'
+                    continue
+                fi
                 ensure_firewall_zone 'awg' 'awg0' '' 'REJECT'
                 ensure_hotplug_route 'awg0'
                 break
@@ -1050,7 +1236,7 @@ select_tunnel() {
             3)
                 TUNNEL='ovpn'
                 TUN_DEV='tun0'
-                pkg_install openvpn-openssl || true
+                pkg_install openvpn-openssl || warn 'openvpn-openssl не установлен автоматически. Настройте OpenVPN вручную.'
                 ensure_firewall_zone 'ovpn' '' 'tun0' 'REJECT'
                 ensure_hotplug_route 'tun0'
                 break
@@ -1059,6 +1245,13 @@ select_tunnel() {
                 TUNNEL='singbox'
                 TUN_DEV='tun0'
                 configure_singbox_template
+                rc=$?
+                [ "$rc" -eq "$BACK_RC" ] && continue
+                [ "$rc" -eq "$STOP_RC" ] && return "$STOP_RC"
+                if [ "$rc" -ne 0 ]; then
+                    input_error 'Sing-box не настроен. Выберите пункт заново или вернитесь назад.'
+                    continue
+                fi
                 ensure_firewall_zone 'singbox' '' 'tun0' 'ACCEPT'
                 ensure_hotplug_route 'tun0'
                 break
@@ -1074,12 +1267,12 @@ select_tunnel() {
                 TUNNEL='0'
                 break
                 ;;
-            *) echo 'Введите число от 1 до 6.' ;;
+            *) echo 'Введите число от 1 до 6, 0 или q.' ;;
         esac
     done
     uci commit firewall >/dev/null 2>&1 || true
+    return 0
 }
-
 write_update_script() {
     cat > "$UPDATE_SCRIPT" <<'EOF_UPDATE'
 #!/bin/sh
@@ -1118,7 +1311,26 @@ normalize_domain() {
 }
 
 valid_ipv4_or_cidr() {
-    printf '%s\n' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'
+    value="$1"
+    case "$value" in
+        */*) ip_part="${value%/*}"; mask_part="${value#*/}" ;;
+        *) ip_part="$value"; mask_part='' ;;
+    esac
+    printf '%s\n' "$ip_part" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+    old_ifs="$IFS"
+    IFS='.'
+    set -- $ip_part
+    IFS="$old_ifs"
+    [ $# -eq 4 ] || return 1
+    for octet in "$@"; do
+        case "$octet" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$octet" -le 255 ] 2>/dev/null || return 1
+    done
+    if [ -n "$mask_part" ]; then
+        case "$mask_part" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$mask_part" -ge 0 ] 2>/dev/null && [ "$mask_part" -le 32 ] 2>/dev/null || return 1
+    fi
+    return 0
 }
 
 acquire_lock() {
@@ -1373,6 +1585,22 @@ install_base_packages() {
     install_dnsmasq_full
 }
 
+select_initial_options() {
+    while true; do
+        select_domain_source
+        rc=$?
+        [ "$rc" -eq "$STOP_RC" ] && return "$STOP_RC"
+
+        select_safety_options
+        rc=$?
+        if [ "$rc" -eq "$BACK_RC" ]; then
+            continue
+        fi
+        [ "$rc" -eq "$STOP_RC" ] && return "$STOP_RC"
+        return 0
+    done
+}
+
 main() {
     check_system
     warn 'Перед продолжением сделайте резервную копию настроек OpenWrt. Скрипт изменяет firewall, network и dnsmasq.'
@@ -1381,8 +1609,12 @@ main() {
 
     ensure_directories
     seed_lists
-    select_domain_source
-    select_safety_options
+    select_initial_options
+    rc=$?
+    if [ "$rc" -eq "$STOP_RC" ]; then
+        warn 'Установка остановлена пользователем до применения основных изменений.'
+        exit 0
+    fi
     write_config
     install_base_packages
     ensure_dnsmasq_confdir
@@ -1393,6 +1625,15 @@ main() {
     ensure_firewall
     ensure_force_lan_dns
     select_tunnel
+    rc=$?
+    if [ "$rc" -eq "$STOP_RC" ]; then
+        warn 'Установка остановлена пользователем. Уже применённые базовые настройки сохранены; при необходимости запустите getdomains-uninstall.sh.'
+        exit 0
+    fi
+    if [ "$rc" -eq "$BACK_RC" ]; then
+        warn 'Возврат из выбора туннеля после применения базовых настроек невозможен без повторного запуска. Запустите скрипт ещё раз, чтобы изменить ранние параметры.'
+        exit 0
+    fi
     write_update_script
     write_init_script
     ensure_cron
