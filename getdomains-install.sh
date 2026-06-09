@@ -1,7 +1,7 @@
 #!/bin/sh
 
 #set -x
-PROJECT_VERSION="v22"
+PROJECT_VERSION="v24"
 
 # Project defaults for dagmagnat/routing-openwrt.
 # Lists are read from GitHub RAW links. By default they are stored in this repository,
@@ -15,10 +15,10 @@ DEFAULT_IPV4_LIST_URL="${ROUTING_OPENWRT_IPV4_URL:-${DEFAULT_LISTS_BASE_URL}/ipv
 DEFAULT_IPV6_LIST_URL="${ROUTING_OPENWRT_IPV6_URL:-${DEFAULT_LISTS_BASE_URL}/ipv6.lst}"
 
 # Safe defaults. 1 = use, 0 = skip.
-# Domain routing is enabled. IPv4 CIDR, IPv6, DNS redirect and blackhole are OFF by default
+# Domain and IPv4 CIDR routing are enabled by default. IPv6, DNS redirect and blackhole are OFF by default
 # so ordinary WAN internet is not broken if VPN/list/DNS is unavailable.
 DEFAULT_USE_DOMAIN_LIST="1"
-DEFAULT_USE_IPV4_LIST="0"
+DEFAULT_USE_IPV4_LIST="1"
 DEFAULT_IPV6_SUPPORT="0"
 DEFAULT_DNS_REDIRECT="0"
 DEFAULT_FAIL_MODE="open"
@@ -174,6 +174,7 @@ configure_openvpn_from_paste() {
     uci commit openvpn
 
     uci -q delete network.ovpn0
+    uci -q delete sing-box.main
     uci set network.ovpn0='interface'
     uci set network.ovpn0.proto='none'
     uci set network.ovpn0.device="$OVPN_ROUTE_DEV"
@@ -258,6 +259,7 @@ configure_openvpn_existing() {
         fi
 
         uci -q delete network.ovpn0
+    uci -q delete sing-box.main
         uci set network.ovpn0='interface'
         uci set network.ovpn0.proto='none'
         uci set network.ovpn0.device="$OVPN_ROUTE_DEV"
@@ -301,6 +303,282 @@ check_singbox_requirements() {
         return 1
     fi
     return 0
+}
+
+
+url_decode_sed() {
+    # Minimal percent-decoder for common VLESS URL fields. BusyBox-friendly.
+    printf '%s' "$1" | sed \
+        -e 's/%2[Ff]/\//g' -e 's/%3[Aa]/:/g' -e 's/%40/@/g' \
+        -e 's/%3[Dd]/=/g' -e 's/%26/\&/g' -e 's/%23/#/g' \
+        -e 's/%2[Dd]/-/g' -e 's/%5[Ff]/_/g' -e 's/%2[Ee]/./g' \
+        -e 's/%20/ /g'
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+singbox_parse_vless_url() {
+    uri="$1"
+    case "$uri" in
+        vless://*) ;;
+        *) return 1 ;;
+    esac
+
+    main="${uri#vless://}"
+    main="${main%%\?*}"
+    main="${main%%#*}"
+    SING_UUID="${main%@*}"
+    server_port="${main#*@}"
+    SING_SERVER="${server_port%%:*}"
+    SING_PORT="${server_port##*:}"
+
+    query="${uri#*\?}"
+    [ "$query" = "$uri" ] && query=""
+    query="${query%%#*}"
+
+    SING_FLOW=""
+    SING_FP="chrome"
+    SING_PBK=""
+    SING_SECURITY=""
+    SING_SID=""
+    SING_SNI=""
+    SING_SPX=""
+    SING_TYPE="tcp"
+
+    OLD_IFS="$IFS"
+    IFS='&'
+    for pair in $query; do
+        key="${pair%%=*}"
+        val="${pair#*=}"
+        val=$(url_decode_sed "$val")
+        case "$key" in
+            flow) SING_FLOW="$val" ;;
+            fp) SING_FP="$val" ;;
+            pbk) SING_PBK="$val" ;;
+            security) SING_SECURITY="$val" ;;
+            sid) SING_SID="$val" ;;
+            sni) SING_SNI="$val" ;;
+            spx) SING_SPX="$val" ;;
+            type) SING_TYPE="$val" ;;
+        esac
+    done
+    IFS="$OLD_IFS"
+
+    [ -n "$SING_UUID" ] && [ -n "$SING_SERVER" ] && [ -n "$SING_PORT" ] || return 1
+    case "$SING_PORT" in *[!0-9]*|'') return 1 ;; esac
+    return 0
+}
+
+singbox_first_vless_from_subscription() {
+    url="$1"
+    tmp="/tmp/routing-openwrt-singbox-sub.txt"
+    decoded="/tmp/routing-openwrt-singbox-sub.decoded"
+    rm -f "$tmp" "$decoded"
+    curl -L -f --connect-timeout 15 --max-time 45 --retry 2 "$url" -o "$tmp" || return 1
+
+    tr ' \r' '\n' < "$tmp" | grep '^vless://' | head -n 1 > "$decoded.line"
+    if [ -s "$decoded.line" ]; then
+        cat "$decoded.line"
+        rm -f "$tmp" "$decoded" "$decoded.line"
+        return 0
+    fi
+
+    if command -v base64 >/dev/null 2>&1; then
+        base64 -d "$tmp" > "$decoded" 2>/dev/null || base64 -D "$tmp" > "$decoded" 2>/dev/null || true
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl base64 -d -in "$tmp" -out "$decoded" 2>/dev/null || true
+    fi
+
+    if [ -s "$decoded" ]; then
+        tr ' \r' '\n' < "$decoded" | grep '^vless://' | head -n 1
+        rm -f "$tmp" "$decoded" "$decoded.line"
+        return 0
+    fi
+
+    rm -f "$tmp" "$decoded" "$decoded.line"
+    return 1
+}
+
+singbox_write_vless_config() {
+    mkdir -p /etc/sing-box
+    cfg="/etc/sing-box/config.json"
+
+    uuid=$(json_escape "$SING_UUID")
+    server=$(json_escape "$SING_SERVER")
+    flow=$(json_escape "$SING_FLOW")
+    sni=$(json_escape "$SING_SNI")
+    fp=$(json_escape "${SING_FP:-chrome}")
+    pbk=$(json_escape "$SING_PBK")
+    sid=$(json_escape "$SING_SID")
+    spx=$(json_escape "$SING_SPX")
+
+    cat > "$cfg" <<EOF
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "sbtun0",
+      "address": ["172.19.0.1/30"],
+      "mtu": 9000,
+      "auto_route": false,
+      "strict_route": false,
+      "stack": "system",
+      "sniff": true,
+      "domain_strategy": "ipv4_only"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "$server",
+      "server_port": $SING_PORT,
+      "uuid": "$uuid",
+      "flow": "$flow",
+      "tls": {
+        "enabled": true,
+        "server_name": "$sni",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "$fp"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "$pbk",
+          "short_id": "$sid"
+        }
+      },
+      "transport": {
+        "type": "tcp"
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "final": "proxy"
+  }
+}
+EOF
+    chmod 600 "$cfg" 2>/dev/null || true
+}
+
+install_singbox_packages() {
+    msgc "$C_BLUE" "Checking Sing-box requirements" "Проверка требований Sing-box"
+    check_singbox_requirements || return 1
+
+    if pkg_is_installed sing-box || command -v sing-box >/dev/null 2>&1; then
+        msgc "$C_GREEN" "Sing-box is already installed" "Sing-box уже установлен"
+    else
+        msg "Installing sing-box" "Установка sing-box"
+        pkg_install sing-box || pkg_install sing-box-tiny || {
+            msgc "$C_RED" "Failed to install sing-box. Check package repository and free space." "Не удалось установить sing-box. Проверьте репозиторий пакетов и свободное место."
+            return 1
+        }
+    fi
+
+    pkg_is_installed kmod-tun || pkg_install kmod-tun >/dev/null 2>&1 || true
+    return 0
+}
+
+configure_singbox_service() {
+    mkdir -p /etc/config /etc/sing-box
+
+    if ! uci -q get sing-box.main >/dev/null 2>&1; then
+        uci set sing-box.main='sing-box'
+    fi
+    uci set sing-box.main.enabled='1'
+    uci set sing-box.main.user='root'
+    uci set sing-box.main.conffile='/etc/sing-box/config.json'
+    uci set sing-box.main.workdir='/usr/share/sing-box'
+    uci commit sing-box 2>/dev/null || true
+
+    if command -v sing-box >/dev/null 2>&1; then
+        sing-box check -c /etc/sing-box/config.json >/tmp/routing-openwrt-singbox-check.log 2>&1 || {
+            msgc "$C_RED" "sing-box config check failed. See /tmp/routing-openwrt-singbox-check.log" "Проверка sing-box конфига не прошла. Смотрите /tmp/routing-openwrt-singbox-check.log"
+            return 1
+        }
+    fi
+
+    /etc/init.d/sing-box enable >/dev/null 2>&1 || true
+    /etc/init.d/sing-box restart >/dev/null 2>&1 || /etc/init.d/sing-box start >/dev/null 2>&1 || {
+        msgc "$C_RED" "sing-box service failed to start." "Сервис sing-box не запустился."
+        return 1
+    }
+
+    i=0
+    while [ "$i" -lt 20 ]; do
+        ip link show sbtun0 >/dev/null 2>&1 && break
+        sleep 1
+        i=$((i+1))
+    done
+
+    if ! ip link show sbtun0 >/dev/null 2>&1; then
+        msgc "$C_RED" "sbtun0 was not created. Sing-box is not ready; ordinary WAN internet is unchanged." "sbtun0 не создан. Sing-box не готов; обычный WAN интернет не изменён."
+        return 1
+    fi
+
+    SINGBOX_ROUTE_DEV="sbtun0"
+    TUNNEL="singbox"
+    route_vpn
+    return 0
+}
+
+configure_singbox_menu() {
+    msgc "$C_BLUE" "Sing-box setup" "Настройка Sing-box"
+    msgc "$C_YELLOW" "Safe mode: sing-box auto_route is OFF. routing-openwrt will send only marked domains/IPs to sbtun0." "Безопасный режим: auto_route у sing-box выключен. routing-openwrt отправляет в sbtun0 только отмеченные домены/IP."
+    echo "1) $(prompt "Paste VLESS Reality link" "Вставить ссылку VLESS Reality")"
+    echo "2) $(prompt "Use subscription URL and take first VLESS link" "Использовать ссылку подписки и взять первую VLESS-ссылку")"
+    echo "3) $(prompt "Cancel" "Отмена")"
+    while true; do
+        printf "%s" "$(prompt "Choice [1]: " "Выбор [1]: ")"
+        read -r SB_MODE
+        SB_MODE=${SB_MODE:-1}
+        case "$SB_MODE" in
+            1)
+                printf "%s" "$(prompt "Paste vless:// link: " "Вставьте vless:// ссылку: ")"
+                read -r SB_LINK
+                ;;
+            2)
+                printf "%s" "$(prompt "Paste subscription URL: " "Вставьте ссылку подписки: ")"
+                read -r SB_SUB
+                SB_LINK=$(singbox_first_vless_from_subscription "$SB_SUB") || SB_LINK=""
+                [ -n "$SB_LINK" ] || { msgc "$C_RED" "No VLESS link found in subscription." "В подписке не найдена VLESS-ссылка."; continue; }
+                ;;
+            3) return 1 ;;
+            *) msgc "$C_RED" "Choose 1, 2 or 3." "Выберите 1, 2 или 3."; continue ;;
+        esac
+
+        if ! singbox_parse_vless_url "$SB_LINK"; then
+            msgc "$C_RED" "Unsupported or invalid link. Currently only vless:// Reality links are supported." "Неподдерживаемая или неверная ссылка. Сейчас поддерживаются только vless:// Reality ссылки."
+            continue
+        fi
+
+        if [ "$SING_SECURITY" != "reality" ]; then
+            msgc "$C_RED" "Only VLESS Reality is supported in this first Sing-box mode." "В первом режиме Sing-box поддерживается только VLESS Reality."
+            continue
+        fi
+
+        [ -n "$SING_PBK" ] && [ -n "$SING_SNI" ] || {
+            msgc "$C_RED" "Reality public key or SNI is missing in the link." "В ссылке нет Reality public key или SNI."
+            continue
+        }
+
+        install_singbox_packages || return 1
+        singbox_write_vless_config
+        configure_singbox_service || return 1
+        msgc "$C_GREEN" "Sing-box routing is configured via sbtun0." "Маршрутизация Sing-box настроена через sbtun0."
+        return 0
+    done
 }
 
 cfg_get_section_value() {
@@ -411,6 +689,7 @@ detect_existing_routing_config() {
         case "$old_route_dev" in
             awg0) EXISTING_TUNNEL="awg"; EXISTING_IFACE="awg0" ;;
             wg0) EXISTING_TUNNEL="wg"; EXISTING_IFACE="wg0" ;;
+            sbtun0) EXISTING_TUNNEL="singbox"; EXISTING_IFACE="sbtun0" ;;
             tun*) EXISTING_TUNNEL="ovpn"; EXISTING_IFACE="$old_route_dev" ;;
         esac
     fi
@@ -434,6 +713,10 @@ cleanup_existing_routing_config() {
     uci -q delete network.wg0
     uci -q delete network.awg0
     uci -q delete network.ovpn0
+    /etc/init.d/sing-box stop >/dev/null 2>&1 || true
+    uci -q delete sing-box.main
+    rm -f /etc/sing-box/config.json
+    uci commit sing-box >/dev/null 2>&1 || true
     uci -q delete network.vpn_route
     delete_uci_sections_by_type network wireguard_wg0
     delete_uci_sections_by_type network amneziawg_awg0
@@ -465,6 +748,7 @@ handle_existing_routing_config() {
     fi
     echo "1) $(prompt "Skip tunnel setup and use existing config" "Пропустить настройку туннеля и использовать существующий") [$(prompt "default" "по умолчанию")]"
     echo "2) $(prompt "Replace old config and create a new one" "Заменить старый конфиг и настроить новый")"
+    echo "3) $(prompt "Run diagnostics" "Запустить диагностику")"
 
     while true; do
         printf "%s" "$(prompt "Select [1]: " "Выберите [1]: ")"
@@ -484,7 +768,10 @@ handle_existing_routing_config() {
                 cleanup_existing_routing_config
                 return 1
                 ;;
-            *) msgc "$C_RED" "Choose 1 or 2" "Выберите 1 или 2" ;;
+            3)
+                run_diagnostics_now
+                ;;
+            *) msgc "$C_RED" "Choose 1, 2 or 3" "Выберите 1, 2 или 3" ;;
         esac
     done
 }
@@ -652,7 +939,7 @@ EOF
 [ -f /etc/domain-routing-route.conf ] && . /etc/domain-routing-route.conf
 [ -f /etc/domain-routing-user.conf ] && . /etc/domain-routing-user.conf
 
-echo "=== routing-openwrt v22 status ==="
+echo "=== routing-openwrt v24 status ==="
 echo "VPN_ROUTE_DEV=${VPN_ROUTE_DEV:-not set}"
 echo "IPV6_SUPPORT=${IPV6_SUPPORT:-0}"
 echo "DOMAINS_URL=${DOMAINS_URL:-not set}"
@@ -694,6 +981,17 @@ log() { logger -t "$LOG_TAG" "$*" 2>/dev/null || echo "$LOG_TAG: $*"; }
 
 [ -f /etc/domain-routing-route.conf ] && . /etc/domain-routing-route.conf
 [ -f /etc/domain-routing-user.conf ] && . /etc/domain-routing-user.conf
+
+# Sing-box safety: if sbtun0 is selected but sing-box is stopped, try to restart it.
+# If it still does not create sbtun0, domain-routing-route.sh will keep table vpn empty
+# and normal WAN internet will continue to work.
+if [ "$VPN_ROUTE_DEV" = "sbtun0" ]; then
+    if ! pidof sing-box >/dev/null 2>&1 || ! ip link show sbtun0 >/dev/null 2>&1; then
+        log "sing-box missing or sbtun0 missing; restarting sing-box"
+        /etc/init.d/sing-box restart >/dev/null 2>&1 || true
+        sleep 5
+    fi
+fi
 
 # Remove stale fail-closed leftovers from old builds.
 ip route del blackhole default table vpn metric 42767 >/dev/null 2>&1 || true
@@ -783,36 +1081,35 @@ add_tunnel() {
     if is_ru; then
         printf "1) %bWireGuard%b                         %b[работает]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
         printf "2) %bOpenVPN%b                           %b[работает]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
-        printf "3) %bSing-box%b                          %b[позже, с проверкой памяти]%b\n" "$C_YELLOW" "$C_RESET" "$C_YELLOW" "$C_RESET"
+        printf "3) %bSing-box%b                          %b[экспериментально, VLESS Reality]%b\n" "$C_GREEN" "$C_RESET" "$C_YELLOW" "$C_RESET"
         printf "4) %bПропустить настройку туннеля%b\n" "$C_RED" "$C_RESET"
-        printf "5) %bAmneziaWG / Amnezia WireGuard%b     %b[работает]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "5) %bДиагностика%b                       %b[проверка]%b\n" "$C_BLUE" "$C_RESET" "$C_BLUE" "$C_RESET"
+        printf "6) %bAmneziaWG / Amnezia WireGuard%b     %b[работает]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
         echo
-        echo "Сейчас автоматически настраиваются WireGuard, AmneziaWG и OpenVPN."
+        echo "Сейчас автоматически настраиваются WireGuard, AmneziaWG, OpenVPN и Sing-box."
     else
         printf "1) %bWireGuard%b                         %b[active]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
         printf "2) %bOpenVPN%b                           %b[active]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
-        printf "3) %bSing-box%b                          %b[later, resource check]%b\n" "$C_YELLOW" "$C_RESET" "$C_YELLOW" "$C_RESET"
+        printf "3) %bSing-box%b                          %b[experimental, VLESS Reality]%b\n" "$C_GREEN" "$C_RESET" "$C_YELLOW" "$C_RESET"
         printf "4) %bSkip tunnel setup%b\n" "$C_RED" "$C_RESET"
-        printf "5) %bAmneziaWG / Amnezia WireGuard%b     %b[active]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "5) %bDiagnostics%b                       %b[check]%b\n" "$C_BLUE" "$C_RESET" "$C_BLUE" "$C_RESET"
+        printf "6) %bAmneziaWG / Amnezia WireGuard%b     %b[active]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
         echo
-        echo "Currently WireGuard, AmneziaWG and OpenVPN are configured automatically."
+        echo "Currently WireGuard, AmneziaWG, OpenVPN and Sing-box are configured automatically."
     fi
 
     while true; do
-        printf "%s" "$(prompt "Choice [5]: " "Выбор [5]: ")"
+        printf "%s" "$(prompt "Choice [6]: " "Выбор [6]: ")"
         read -r TUNNEL
-        TUNNEL=${TUNNEL:-5}
+        TUNNEL=${TUNNEL:-6}
         case $TUNNEL in
         1) TUNNEL=wg; break ;;
         2) TUNNEL=ovpn; break ;;
-        3)
-            if check_singbox_requirements; then
-                msgc "$C_YELLOW" "Sing-box support is planned for the next stage." "Поддержка Sing-box будет на следующем этапе."
-            fi
-            ;;
+        3) TUNNEL=singbox; break ;;
         4) msgc "$C_RED" "Skip tunnel setup" "Настройка туннеля пропущена"; TUNNEL=0; break ;;
-        5) TUNNEL=awg; break ;;
-        *) msgc "$C_RED" "Choose 1, 2, 3, 4 or 5." "Выберите 1, 2, 3, 4 или 5." ;;
+        5) run_diagnostics_now; clear_screen; continue ;;
+        6) TUNNEL=awg; break ;;
+        *) msgc "$C_RED" "Choose 1, 2, 3, 4, 5 or 6." "Выберите 1, 2, 3, 4, 5 или 6." ;;
         esac
     done
 
@@ -877,64 +1174,10 @@ add_tunnel() {
     fi
 
     if [ "$TUNNEL" == 'singbox' ]; then
-        if pkg_is_installed sing-box; then
-            echo "Sing-box already installed"
-        else
-            AVAILABLE_SPACE=$(df / | awk 'NR>1 { print $4 }')
-            if  [[ "$AVAILABLE_SPACE" -gt 2000 ]]; then
-                echo "Installed sing-box"
-                pkg_install sing-box
-            else
-                printf "\033[31;1mNo free space for a sing-box. Sing-box is not installed.\033[0m\n"
-                exit 1
-            fi
-        fi
-        if grep -q "option enabled '0'" /etc/config/sing-box; then
-            sed -i "s/	option enabled \'0\'/	option enabled \'1\'/" /etc/config/sing-box
-        fi
-        if grep -q "option user 'sing-box'" /etc/config/sing-box; then
-            sed -i "s/	option user \'sing-box\'/	option user \'root\'/" /etc/config/sing-box
-        fi
-        if grep -q "tun0" /etc/sing-box/config.json; then
-        printf "\033[32;1mConfig /etc/sing-box/config.json already exists\033[0m\n"
-        else
-cat << 'EOF' > /etc/sing-box/config.json
-{
-  "log": {
-    "level": "debug"
-  },
-  "inbounds": [
-    {
-      "type": "tun",
-      "interface_name": "tun0",
-      "domain_strategy": "ipv4_only",
-      "address": ["172.16.250.1/30"],
-      "auto_route": false,
-      "strict_route": false,
-      "sniff": true 
-   }
-  ],
-  "outbounds": [
-    {
-      "type": "$TYPE",
-      "server": "$HOST",
-      "server_port": $PORT,
-      "method": "$METHOD",
-      "password": "$PASS"
-    }
-  ],
-  "route": {
-    "auto_detect_interface": true
-  }
-}
-EOF
-        printf "\033[32;1mCreate template config in /etc/sing-box/config.json. Edit it manually. Official doc: https://sing-box.sagernet.org/configuration/outbound/\033[0m\n"
-        printf "\033[32;1mOfficial doc: https://sing-box.sagernet.org/configuration/outbound/\033[0m\n"
-        printf "\033[32;1mManual with example SS: https://cli.co/Badmn3K \033[0m\n"
-
-        fi
-        printf "\033[32;1mConfigure route for Sing-box\033[0m\n"
-        route_vpn
+        configure_singbox_menu || {
+            msgc "$C_RED" "Sing-box setup cancelled" "Настройка Sing-box отменена"
+            TUNNEL=0
+        }
     fi
 
     if [ "$TUNNEL" == 'wgForYoutube' ]; then
@@ -1135,14 +1378,10 @@ add_zone() {
         elif [ "$TUNNEL" == singbox ] || [ "$TUNNEL" == ovpn ] || [ "$TUNNEL" == tun2socks ]; then
             uci set firewall.@zone[-1].device="${VPN_ROUTE_DEV:-tun0}"
         fi
-        if [ "$TUNNEL" == wg ] || [ "$TUNNEL" == awg ] || [ "$TUNNEL" == ovpn ] || [ "$TUNNEL" == tun2socks ]; then
+        if [ "$TUNNEL" == wg ] || [ "$TUNNEL" == awg ] || [ "$TUNNEL" == ovpn ] || [ "$TUNNEL" == tun2socks ] || [ "$TUNNEL" == singbox ]; then
             uci set firewall.@zone[-1].forward='REJECT'
             uci set firewall.@zone[-1].output='ACCEPT'
             uci set firewall.@zone[-1].input='REJECT'
-        elif [ "$TUNNEL" == singbox ]; then
-            uci set firewall.@zone[-1].forward='ACCEPT'
-            uci set firewall.@zone[-1].output='ACCEPT'
-            uci set firewall.@zone[-1].input='ACCEPT'
         fi
         uci set firewall.@zone[-1].masq='1'
         uci set firewall.@zone[-1].mtu_fix='1'
@@ -1360,8 +1599,157 @@ ensure_lan_dns_redirect() {
     echo "LAN DNS redirect enabled / DNS LAN перенаправляется на роутер: $LAN_IP:53"
 }
 
+install_diagnostics_script() {
+    mkdir -p /usr/sbin
+    cat << 'EOF' > /usr/sbin/routing-openwrt-diagnose.sh
+#!/bin/sh
+
+# routing-openwrt diagnostics. This command does not change ordinary WAN routing.
+# It prints enough information to paste into an issue/chat for troubleshooting.
+
+RED='\033[31;1m'; GREEN='\033[32;1m'; YELLOW='\033[33;1m'; BLUE='\033[34;1m'; RESET='\033[0m'
+ok() { printf "%bOK%b: %s\n" "$GREEN" "$RESET" "$*"; }
+warn() { printf "%bWARN%b: %s\n" "$YELLOW" "$RESET" "$*"; }
+bad() { printf "%bERROR%b: %s\n" "$RED" "$RESET" "$*"; }
+section() { printf "\n%b=== %s ===%b\n" "$BLUE" "$1" "$RESET"; }
+
+[ -f /etc/domain-routing-route.conf ] && . /etc/domain-routing-route.conf
+[ -f /etc/domain-routing-user.conf ] && . /etc/domain-routing-user.conf
+
+section "routing-openwrt diagnostics"
+echo "Version: v24"
+echo "Date: $(date 2>/dev/null)"
+echo "Model: $(ubus call system board 2>/dev/null | jsonfilter -e '@.model' 2>/dev/null || cat /tmp/sysinfo/model 2>/dev/null)"
+echo "OpenWrt: $(ubus call system board 2>/dev/null | jsonfilter -e '@.release.description' 2>/dev/null)"
+
+section "Detected tunnel"
+DETECTED=""
+DEV="${VPN_ROUTE_DEV:-}"
+if [ -z "$DEV" ] && [ "$(uci -q get network.awg0.proto 2>/dev/null)" = "amneziawg" ]; then DEV="awg0"; fi
+if [ -z "$DEV" ] && [ "$(uci -q get network.wg0.proto 2>/dev/null)" = "wireguard" ]; then DEV="wg0"; fi
+if [ -z "$DEV" ] && ip link show sbtun0 >/dev/null 2>&1; then DEV="sbtun0"; fi
+if [ -z "$DEV" ]; then DEV=$(ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /^tun[0-9]/ {print $2; exit}'); fi
+VPN_ROUTE_DEV="$DEV"
+
+case "$DEV" in
+    awg0) DETECTED="AmneziaWG" ;;
+    wg0) DETECTED="WireGuard" ;;
+    sbtun0) DETECTED="Sing-box" ;;
+    tun*) DETECTED="OpenVPN" ;;
+    *) DETECTED="unknown" ;;
+esac
+
+echo "Detected type: $DETECTED"
+echo "Route device: ${DEV:-not found}"
+[ -n "$DEV" ] && ip addr show dev "$DEV" 2>/dev/null || warn "VPN route device not found"
+
+case "$DEV" in
+    awg0)
+        if command -v awg >/dev/null 2>&1; then
+            awg show 2>/dev/null | grep -E 'interface:|peer:|endpoint|latest handshake|transfer|allowed ips' || true
+            awg show 2>/dev/null | grep -q 'latest handshake' && ok "AmneziaWG has handshake" || warn "No AmneziaWG handshake shown"
+        else
+            bad "awg command not found"
+        fi
+        ;;
+    wg0)
+        if command -v wg >/dev/null 2>&1; then
+            wg show 2>/dev/null | grep -E 'interface:|peer:|endpoint|latest handshake|transfer|allowed ips' || true
+            wg show 2>/dev/null | grep -q 'latest handshake' && ok "WireGuard has handshake" || warn "No WireGuard handshake shown"
+        else
+            bad "wg command not found"
+        fi
+        ;;
+    sbtun0)
+        pidof sing-box >/dev/null 2>&1 && ok "sing-box process is running" || bad "sing-box process is not running"
+        command -v sing-box >/dev/null 2>&1 && sing-box version 2>/dev/null | head -n 2 || true
+        [ -f /etc/sing-box/config.json ] && sing-box check -c /etc/sing-box/config.json 2>/tmp/routing-openwrt-singbox-check.log && ok "sing-box config check OK" || warn "sing-box config check failed or config missing; see /tmp/routing-openwrt-singbox-check.log"
+        ;;
+    tun*)
+        pidof openvpn >/dev/null 2>&1 && ok "OpenVPN process is running" || warn "OpenVPN process is not running"
+        uci show openvpn 2>/dev/null | sed -n '1,20p'
+        ;;
+esac
+
+section "Normal WAN internet"
+ip route show default 2>/dev/null || true
+if ping -c 2 -W 2 1.1.1.1 >/tmp/routing-openwrt-ping.log 2>&1; then ok "Ping 1.1.1.1 works"; else bad "Ping 1.1.1.1 failed"; cat /tmp/routing-openwrt-ping.log; fi
+if nslookup openwrt.org 192.168.1.1 >/tmp/routing-openwrt-nslookup-wan.log 2>&1; then ok "Router DNS works through 192.168.1.1"; else bad "Router DNS failed"; cat /tmp/routing-openwrt-nslookup-wan.log; fi
+
+section "Lists and dnsmasq"
+ls -lah /tmp/dnsmasq.d/domains.lst /tmp/lst/ipv4.lst /tmp/lst/ipv6.lst 2>/dev/null || true
+[ -s /tmp/dnsmasq.d/domains.lst ] && ok "Domain list exists: $(wc -l < /tmp/dnsmasq.d/domains.lst) lines" || bad "Domain list is missing or empty"
+[ -s /tmp/lst/ipv4.lst ] && ok "IPv4 CIDR list exists: $(wc -l < /tmp/lst/ipv4.lst) lines" || warn "IPv4 CIDR list is missing or empty"
+if dnsmasq --test >/tmp/routing-openwrt-dnsmasq-test.log 2>&1; then ok "dnsmasq syntax OK"; else bad "dnsmasq test failed"; cat /tmp/routing-openwrt-dnsmasq-test.log; fi
+uci show dhcp 2>/dev/null | grep -E "dnsmasq.d|filter_aaaa" || true
+
+section "Policy routing"
+ip rule show 2>/dev/null | grep -E 'fwmark 0x1|lookup vpn' || bad "No fwmark 0x1 rule found"
+VPN_TABLE=$(ip route show table vpn 2>/dev/null)
+printf '%s\n' "$VPN_TABLE"
+echo "$VPN_TABLE" | grep -q 'blackhole' && bad "blackhole route found in table vpn; old broken fail-closed route must be removed"
+if [ -n "$DEV" ] && ip link show dev "$DEV" 2>/dev/null | grep -q 'UP'; then
+    echo "$VPN_TABLE" | grep -q "dev $DEV" && ok "table vpn routes marked traffic to $DEV" || bad "table vpn does not route to $DEV"
+else
+    [ -z "$VPN_TABLE" ] && ok "VPN device is down/missing and table vpn is empty: fail-open OK" || warn "VPN device is down/missing but table vpn is not empty"
+fi
+
+section "Firewall/nft marks"
+nft list ruleset 2>/tmp/routing-openwrt-nft.err | grep -E 'vpn_domains|vpn_subnets|mark_domains|mark_subnet|routing_openwrt_force_dns' -n || warn "No routing-openwrt nft/firewall rules shown"
+if nft list set inet fw4 vpn_domains >/tmp/routing-openwrt-vpn-domains-set 2>/dev/null; then
+    ok "nft set vpn_domains exists"
+    head -n 40 /tmp/routing-openwrt-vpn-domains-set
+else
+    bad "nft set vpn_domains does not exist"
+fi
+if nft list set inet fw4 vpn_subnets >/tmp/routing-openwrt-vpn-subnets-set 2>/dev/null; then
+    ok "nft set vpn_subnets exists"
+    head -n 20 /tmp/routing-openwrt-vpn-subnets-set
+else
+    warn "nft set vpn_subnets does not exist or IPv4 CIDR list was not applied"
+fi
+
+section "YouTube route test"
+YOUTUBE_IP=$(nslookup youtube.com 192.168.1.1 2>/tmp/routing-openwrt-youtube-nslookup.log | awk '/^Address: / && $2 ~ /^[0-9.]+$/ {print $2; exit}')
+if [ -n "$YOUTUBE_IP" ]; then
+    ok "youtube.com resolved by router to $YOUTUBE_IP"
+    nft list set inet fw4 vpn_domains 2>/dev/null | grep -q "$YOUTUBE_IP" && ok "youtube.com IP is in vpn_domains" || warn "youtube.com IP is not visible in vpn_domains yet"
+    echo "ip route get $YOUTUBE_IP mark 0x1:"
+    ip route get "$YOUTUBE_IP" mark 0x1 2>/dev/null || true
+    ip route get "$YOUTUBE_IP" mark 0x1 2>/dev/null | grep -q "dev ${DEV}" && ok "marked YouTube traffic would use $DEV" || warn "marked YouTube route does not show $DEV"
+else
+    bad "Could not resolve youtube.com through router DNS"
+    cat /tmp/routing-openwrt-youtube-nslookup.log 2>/dev/null
+fi
+
+section "LAN / Wi-Fi notes"
+echo "LAN IP: $(uci -q get network.lan.ipaddr 2>/dev/null)"
+echo "LAN device: $(uci -q get network.lan.device 2>/dev/null)"
+echo "Firewall LAN zone:"
+uci show firewall 2>/dev/null | grep -E "zone.*name='lan'|network='lan'|network=.*lan" | head -n 20
+MARK_LINES=$(nft list ruleset 2>/dev/null | grep -E 'mark_domains|mark_subnet' || true)
+echo "$MARK_LINES"
+echo "$MARK_LINES" | grep -q 'packets 0' && warn "Mark counters include 0 packets. Open YouTube from a LAN client and run diagnostics again. If still 0, client may use Private DNS/DoH or not pass through LAN zone."
+
+section "Recommended repair commands"
+echo "Update lists:          /etc/init.d/getdomains start"
+echo "Repair route:          /usr/sbin/domain-routing-route.sh"
+echo "Restart firewall/DNS:  /etc/init.d/firewall restart; /etc/init.d/dnsmasq restart"
+echo "Full status:           /usr/sbin/domain-routing-status.sh"
+echo "Paste this whole diagnostics output when asking for help."
+EOF
+    chmod +x /usr/sbin/routing-openwrt-diagnose.sh
+}
+
+run_diagnostics_now() {
+    install_diagnostics_script
+    /usr/sbin/routing-openwrt-diagnose.sh
+    pause_screen
+}
+
 install_management_commands() {
     mkdir -p /usr/sbin
+    install_diagnostics_script
     cat << 'EOF' > /usr/sbin/routing-openwrt-update.sh
 #!/bin/sh
 # Update routing-openwrt from GitHub without deleting the current tunnel config.
@@ -1375,6 +1763,12 @@ EOF
 cd /tmp && wget --no-check-certificate -O /tmp/routing-openwrt-uninstall.sh https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh && sh /tmp/routing-openwrt-uninstall.sh
 EOF
     chmod +x /usr/sbin/routing-openwrt-uninstall.sh
+
+    cat << 'EOF' > /usr/sbin/routing-openwrt-diagnose-update.sh
+#!/bin/sh
+/usr/sbin/routing-openwrt-diagnose.sh "$@"
+EOF
+    chmod +x /usr/sbin/routing-openwrt-diagnose-update.sh
 }
 
 update_existing_installation() {
@@ -1395,7 +1789,8 @@ update_existing_installation() {
         case "$VPN_ROUTE_DEV" in
             awg0) TUNNEL="awg"; route_vpn ;;
             wg0) TUNNEL="wg"; route_vpn ;;
-            tun0) TUNNEL="tun2socks"; route_vpn ;;
+            sbtun0) TUNNEL="singbox"; SINGBOX_ROUTE_DEV="sbtun0"; route_vpn ;;
+            tun*) TUNNEL="ovpn"; OVPN_ROUTE_DEV="$VPN_ROUTE_DEV"; route_vpn ;;
         esac
     else
         echo "Warning: no existing awg0/wg0/tun0 route config found. Lists/firewall will be updated, but tunnel route may need reinstall."

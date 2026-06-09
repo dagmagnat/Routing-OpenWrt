@@ -1,21 +1,21 @@
 # routing-openwrt
 
-A simple OpenWrt script: domains from your list are routed through the selected VPN tunnel, while normal internet stays on WAN.
+Simple OpenWrt script: domains and IPv4 CIDR from lists go through the selected tunnel, normal internet stays on WAN.
 
-This project is a fork and modification of the original project: https://github.com/itdoginfo/domain-routing-openwrt
+Форк и доработка оригинального проекта: https://github.com/itdoginfo/domain-routing-openwrt
 
-## Supported
+## Что поддерживается
 
 - WireGuard
 - AmneziaWG / Amnezia WireGuard
-- OpenVPN: paste a full `.ovpn` config or select an existing tun interface
-- Sing-box: not configured automatically yet, resource check only
+- OpenVPN
+- Sing-box, экспериментально: VLESS Reality через `sbtun0`
 
-`tun2socks` was removed from the menu to avoid confusing users. For VLESS/Reality, Sing-box is the better future direction.
+Безопасный режим по умолчанию: **fail-open**. Если туннель упал, обычный WAN-интернет не должен ломаться.
 
-## Routing lists
+## Списки
 
-Default lists are loaded from:
+По умолчанию используются списки из этого репозитория:
 
 ```text
 https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/lists/domains-dnsmasq-nfset.lst
@@ -23,35 +23,37 @@ https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/lists/ipv4.lst
 https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/lists/ipv6.lst
 ```
 
-Lists update daily at 02:00. If a domain is removed from GitHub, it is removed from the router after the next update. If GitHub is unavailable, the last working cache is used.
+Домены и IPv4 включены по умолчанию. IPv6 выключен по умолчанию.
 
-## Install from GitHub
+Списки обновляются каждый день в 02:00. Локальный список заменяется полностью: если домен или IP удалён на GitHub, после обновления он удалится и на роутере. Если GitHub временно недоступен, используется последний рабочий кеш.
+
+## Установка с GitHub
 
 ```sh
 wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/install.sh | sh
 ```
 
-## Update
+## Обновление
 
 ```sh
 wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/update.sh | sh
 ```
 
-## Uninstall
+## Удаление
 
 ```sh
 wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh
 ```
 
-Full project config purge:
+Полная очистка конфигов проекта:
 
 ```sh
 wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh -s -- --purge
 ```
 
-## Manual ZIP install
+## Ручная установка ZIP
 
-Upload the archive to `/tmp` on the router, then run:
+Загрузите архив в `/tmp` на роутер и выполните:
 
 ```sh
 cd /tmp
@@ -62,22 +64,17 @@ chmod +x install.sh update.sh uninstall.sh getdomains-install.sh getdomains-unin
 sh ./install.sh
 ```
 
-`/tmp` is recommended for manual install because it is temporary and does not consume permanent flash after reboot.
+`/tmp` рекомендуется для ручной установки, потому что это временная папка и она не занимает постоянную flash-память после перезагрузки.
 
-## OpenVPN
+## Диагностика
 
-When OpenVPN is selected, the installer checks and installs:
+```sh
+/usr/sbin/routing-openwrt-diagnose.sh
+```
 
-- `openvpn-openssl`
-- `luci-app-openvpn` — optional LuCI UI
-- `kmod-ovpn-dco` — optional DCO acceleration when available for your firmware
+Диагностика показывает туннель, маршрут YouTube, DNS, списки, nftset, fwmark, таблицу `vpn` и основные ошибки. Вывод можно отправить разработчику для анализа.
 
-OpenVPN modes:
-
-1. paste a full `.ovpn` config;
-2. create OpenVPN manually in LuCI first, then return and select the existing tun interface.
-
-## Check status
+## Проверка
 
 ```sh
 /usr/sbin/domain-routing-status.sh
@@ -85,5 +82,3 @@ ip route show table vpn
 ip rule show | grep fwmark
 nft list set inet fw4 vpn_domains | head
 ```
-
-If the VPN goes down temporarily, normal WAN internet should continue working. Default mode is fail-open.

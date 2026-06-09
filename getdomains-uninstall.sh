@@ -141,7 +141,13 @@ if [ "$PURGE_TUNNEL" = "1" ]; then
     ifdown awg0 2>/dev/null || true
     ifdown wg0 2>/dev/null || true
     /etc/init.d/openvpn stop 2>/dev/null || true
+    /etc/init.d/sing-box stop 2>/dev/null || true
     rm -f /etc/openvpn/routing_openwrt.ovpn
+    if grep -q 'sbtun0' /etc/sing-box/config.json 2>/dev/null; then
+        rm -f /etc/sing-box/config.json
+        uci -q delete sing-box.main
+        uci commit sing-box 2>/dev/null || true
+    fi
     uci -q delete network.awg0
     uci -q delete network.wg0
     uci -q delete network.ovpn0
@@ -151,7 +157,7 @@ if [ "$PURGE_TUNNEL" = "1" ]; then
     while uci -q delete network.@wireguard_wg0[0] 2>/dev/null; do :; done
     uci commit network
 
-    for zone_name in awg wg ovpn vpn; do
+    for zone_name in awg wg ovpn vpn singbox; do
         while true; do
             id=$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.@zone\[\([0-9]*\)\]\.name='$zone_name'.*/\1/p" | head -n 1)
             [ -z "$id" ] && break
