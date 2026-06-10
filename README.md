@@ -6,6 +6,8 @@
 
 ## Что поддерживается
 
+Система: OpenWrt 23.05/24.10, экспериментально OpenWrt/X-WRT/ImmortalWrt 25.x и 26.x при наличии `uci`, `netifd`, `procd`, `fw4/nftables`, `opkg` или `apk`.
+
 - WireGuard
 - AmneziaWG / Amnezia WireGuard
 - OpenVPN
@@ -63,13 +65,23 @@ lists/profiles/<name>/ipv6.lst
 ## Установка с GitHub
 
 ```sh
-wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/install.sh | sh
+wget -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/install.sh | sh
 ```
+
+Если в X-WRT/ImmortalWrt `wget` не поддерживает HTTPS, сначала поставьте `curl` через `apk`:
+
+```sh
+apk update
+apk add curl ca-certificates ca-bundle unzip
+curl -kL https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/install.sh | sh
+```
+
+Если `curl` уже есть, достаточно последней строки.
 
 ## Обновление
 
 ```sh
-wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/update.sh | sh
+wget -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/update.sh | sh
 ```
 
 Обновление не только заменяет скрипты проекта, но и сразу скачивает свежие списки из GitHub, перезапускает `dnsmasq`/`firewall` и восстанавливает маршрут `table vpn`.
@@ -77,13 +89,13 @@ wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/rou
 ## Удаление
 
 ```sh
-wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh
+wget -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh
 ```
 
 Полная очистка конфигов проекта:
 
 ```sh
-wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh -s -- --purge
+wget -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh -s -- --purge
 ```
 
 ## Ручная установка ZIP

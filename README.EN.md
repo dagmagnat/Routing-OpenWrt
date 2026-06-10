@@ -6,6 +6,8 @@ Fork and modification of the original project: https://github.com/itdoginfo/doma
 
 ## Supported
 
+System: OpenWrt 23.05/24.10, experimental OpenWrt/X-WRT/ImmortalWrt 25.x and 26.x compatible builds with `uci`, `netifd`, `procd`, `fw4/nftables`, `opkg` or `apk`.
+
 - WireGuard
 - AmneziaWG / Amnezia WireGuard
 - OpenVPN
@@ -63,13 +65,23 @@ For weak routers, use the `lite` profile and WireGuard/AmneziaWG. Sing-box check
 ## Install from GitHub
 
 ```sh
-wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/install.sh | sh
+wget -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/install.sh | sh
 ```
+
+If `wget` has no HTTPS support on X-WRT/ImmortalWrt, install `curl` with `apk` first:
+
+```sh
+apk update
+apk add curl ca-certificates ca-bundle unzip
+curl -kL https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/install.sh | sh
+```
+
+If `curl` is already installed, only the last line is needed.
 
 ## Update
 
 ```sh
-wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/update.sh | sh
+wget -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/update.sh | sh
 ```
 
 The update command updates project scripts, downloads fresh GitHub lists, restarts `dnsmasq`/`firewall`, and restores the `table vpn` route.
@@ -77,13 +89,13 @@ The update command updates project scripts, downloads fresh GitHub lists, restar
 ## Uninstall
 
 ```sh
-wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh
+wget -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh
 ```
 
 Full project config cleanup:
 
 ```sh
-wget --no-check-certificate -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh -s -- --purge
+wget -O - https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh | sh -s -- --purge
 ```
 
 ## Manual ZIP install

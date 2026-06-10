@@ -1,7 +1,7 @@
 #!/bin/sh
 
 #set -x
-PROJECT_VERSION="v28"
+PROJECT_VERSION="v31"
 
 # Project defaults for dagmagnat/routing-openwrt.
 # Lists are read from GitHub RAW links. By default they are stored in this repository,
@@ -26,6 +26,35 @@ DEFAULT_DNS_REDIRECT="0"
 DEFAULT_FAIL_MODE="open"
 FORCE_REINSTALL="0"
 [ "$1" = "--reinstall" ] && FORCE_REINSTALL="1"
+
+# Universal downloader for OpenWrt/X-WRT/ImmortalWrt builds.
+# Some builds ship wget without --no-check-certificate, so detect tools/options first.
+wget_has_no_check() { wget --help 2>&1 | grep -q -- '--no-check-certificate'; }
+
+download_url_to_file() {
+    _url="$1"
+    _out="$2"
+    [ -n "$_url" ] && [ -n "$_out" ] || return 1
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -L -k -f --connect-timeout 15 --max-time 120 --retry 2 "$_url" -o "$_out" 2>/dev/null && return 0
+    fi
+
+    if command -v wget >/dev/null 2>&1; then
+        if wget_has_no_check; then
+            wget --no-check-certificate -O "$_out" "$_url" && return 0
+        else
+            wget -O "$_out" "$_url" && return 0
+        fi
+    fi
+
+    if command -v uclient-fetch >/dev/null 2>&1; then
+        uclient-fetch --no-check-certificate -O "$_out" "$_url" 2>/dev/null && return 0
+        uclient-fetch -O "$_out" "$_url" && return 0
+    fi
+
+    return 1
+}
 
 # Colors are used only for orientation during install.
 # Green = success/active, yellow = warning/planned, red = cancel/error/delete, blue = section.
@@ -247,16 +276,21 @@ ovpn_detect_dev() {
 
 ovpn_detect_gateway() {
     # OpenVPN TUN often needs an explicit next-hop gateway in table vpn.
-    # We try cheap local checks only; no network probes and no heavy tools.
+    # Keep this cheap: no probes, no downloads. Prefer server-pushed /1 route,
+    # then connected tun subnet + first host. This handles reconnects where the
+    # server moves the client from 10.28.0.x/22 to 10.28.4.x/22, etc.
     dev="$1"
     [ -n "$dev" ] || dev="tun0"
 
-    # Best source: full-tunnel /1 routes pushed by server before we remove them.
     ip route show 0.0.0.0/1 2>/dev/null | awk -v d="$dev" '$2=="via" && $0 ~ " dev " d "( |$)" {print $3; exit}' | grep -m1 . && return 0
     ip route show 128.0.0.0/1 2>/dev/null | awk -v d="$dev" '$2=="via" && $0 ~ " dev " d "( |$)" {print $3; exit}' | grep -m1 . && return 0
     ip route show default 2>/dev/null | awk -v d="$dev" '$2=="via" && $0 ~ " dev " d "( |$)" {print $3; exit}' | grep -m1 . && return 0
 
-    # topology subnet fallback: OpenVPN server is often .1 inside the TUN subnet.
+    # Connected route is already normalized by the kernel, for example:
+    # 10.28.4.0/22 dev tun0 scope link src 10.28.4.5
+    ip -4 route show dev "$dev" scope link 2>/dev/null | awk 'NR==1 {split($1,n,"/"); split(n[1],o,"."); if (o[1] && o[2] && o[3]) {print o[1]"."o[2]"."o[3]"."(o[4]+1); exit}}' | grep -m1 . && return 0
+
+    # Last fallback: same /24-ish subnet, .1.
     ip -4 addr show dev "$dev" 2>/dev/null | awk '/ inet / {split($2,a,"/"); split(a[1],o,"."); if (o[1] && o[2] && o[3]) {print o[1]"."o[2]"."o[3]".1"; exit}}'
 }
 
@@ -651,7 +685,7 @@ singbox_first_vless_from_subscription() {
     tmp="/tmp/routing-openwrt-singbox-sub.txt"
     decoded="/tmp/routing-openwrt-singbox-sub.decoded"
     rm -f "$tmp" "$decoded"
-    curl -L -f --connect-timeout 15 --max-time 45 --retry 2 "$url" -o "$tmp" || return 1
+    download_url_to_file "$url" "$tmp" || return 1
 
     tr ' \r' '\n' < "$tmp" | grep '^vless://' | head -n 1 > "$decoded.line"
     if [ -s "$decoded.line" ]; then
@@ -1203,10 +1237,34 @@ remove_openvpn_full_tunnel_routes() {
 detect_openvpn_gateway_runtime() {
     dev="$1"
     [ -n "$dev" ] || return 1
+
     ip route show 0.0.0.0/1 2>/dev/null | awk -v d="$dev" '$2=="via" && $0 ~ " dev " d "( |$)" {print $3; exit}' | grep -m1 . && return 0
     ip route show 128.0.0.0/1 2>/dev/null | awk -v d="$dev" '$2=="via" && $0 ~ " dev " d "( |$)" {print $3; exit}' | grep -m1 . && return 0
     ip route show default 2>/dev/null | awk -v d="$dev" '$2=="via" && $0 ~ " dev " d "( |$)" {print $3; exit}' | grep -m1 . && return 0
+
+    # Preferred fallback: first host of the current connected tun subnet.
+    # This avoids stale gateways after OpenVPN reconnects into another pool
+    # (e.g. 10.28.0.3/22 -> 10.28.4.5/22 means gateway must become 10.28.4.1).
+    ip -4 route show dev "$dev" scope link 2>/dev/null | awk 'NR==1 {split($1,n,"/"); split(n[1],o,"."); if (o[1] && o[2] && o[3]) {print o[1]"."o[2]"."o[3]"."(o[4]+1); exit}}' | grep -m1 . && return 0
+
     ip -4 addr show dev "$dev" 2>/dev/null | awk '/ inet / {split($2,a,"/"); split(a[1],o,"."); if (o[1] && o[2] && o[3]) {print o[1]"."o[2]"."o[3]".1"; exit}}'
+}
+
+persist_openvpn_gateway_runtime() {
+    dev="$1"
+    gw="$2"
+    [ -n "$dev" ] || return 0
+    [ -n "$gw" ] || return 0
+    conf="/etc/domain-routing-route.conf"
+    tmp="/tmp/domain-routing-route.conf.$$"
+    {
+        echo "VPN_ROUTE_DEV='$dev'"
+        echo "VPN_ROUTE_GW='$gw'"
+        if [ -f "$conf" ]; then
+            grep -v -E '^(VPN_ROUTE_DEV|VPN_ROUTE_GW)=' "$conf" 2>/dev/null || true
+        fi
+    } > "$tmp"
+    mv "$tmp" "$conf" 2>/dev/null || true
 }
 
 use_vpn_route() {
@@ -1216,11 +1274,22 @@ use_vpn_route() {
 
     case "$VPN_ROUTE_DEV" in
         tun*)
-            GW="${VPN_ROUTE_GW:-$(detect_openvpn_gateway_runtime "$VPN_ROUTE_DEV" | head -n 1)}"
+            # Re-detect every run. OpenVPN may reconnect and receive a different
+            # tun subnet/gateway; a stale VPN_ROUTE_GW breaks policy routing.
+            RUNTIME_GW="$(detect_openvpn_gateway_runtime "$VPN_ROUTE_DEV" | head -n 1)"
+            GW="${RUNTIME_GW:-${VPN_ROUTE_GW:-}}"
             if [ -n "$GW" ]; then
-                ip route replace default via "$GW" dev "$VPN_ROUTE_DEV" table "$TABLE" metric 10 >/dev/null 2>&1 ||                     ip route replace default dev "$VPN_ROUTE_DEV" table "$TABLE" scope link metric 10 >/dev/null 2>&1 || return 1
+                if ip route replace default via "$GW" dev "$VPN_ROUTE_DEV" table "$TABLE" metric 10 >/dev/null 2>&1; then
+                    [ "$GW" = "$VPN_ROUTE_GW" ] || persist_openvpn_gateway_runtime "$VPN_ROUTE_DEV" "$GW"
+                else
+                    # Do not keep a stale gateway. Fail-open by leaving table empty
+                    # rather than installing a weak default dev tun0 route that may not work.
+                    ip route del default table "$TABLE" >/dev/null 2>&1 || true
+                    return 1
+                fi
             else
-                ip route replace default dev "$VPN_ROUTE_DEV" table "$TABLE" scope link metric 10 >/dev/null 2>&1 || return 1
+                ip route del default table "$TABLE" >/dev/null 2>&1 || true
+                return 1
             fi
         ;;
         *)
@@ -2110,14 +2179,14 @@ install_management_commands() {
     cat << 'EOF' > /usr/sbin/routing-openwrt-update.sh
 #!/bin/sh
 # Update routing-openwrt from GitHub without deleting the current tunnel config.
-cd /tmp && wget --no-check-certificate -O /tmp/routing-openwrt-update.sh https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/update.sh && sh /tmp/routing-openwrt-update.sh
+cd /tmp && wget -O /tmp/routing-openwrt-update.sh https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/update.sh && sh /tmp/routing-openwrt-update.sh
 EOF
     chmod +x /usr/sbin/routing-openwrt-update.sh
 
     cat << 'EOF' > /usr/sbin/routing-openwrt-uninstall.sh
 #!/bin/sh
 # Remove routing-openwrt rules, lists, cron and helper scripts.
-cd /tmp && wget --no-check-certificate -O /tmp/routing-openwrt-uninstall.sh https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh && sh /tmp/routing-openwrt-uninstall.sh
+cd /tmp && wget -O /tmp/routing-openwrt-uninstall.sh https://raw.githubusercontent.com/dagmagnat/routing-openwrt/main/uninstall.sh && sh /tmp/routing-openwrt-uninstall.sh
 EOF
     chmod +x /usr/sbin/routing-openwrt-uninstall.sh
 
@@ -2436,7 +2505,7 @@ download_file() {
     url="$1"; tmp="$2"; label="$3"
     [ -z "$url" ] && return 1
     echo "Downloading $label from $url"
-    curl -L -f --connect-timeout 10 --retry 3 "$url" --output "$tmp"
+    download_url_to_file "$url" "$tmp"
 }
 
 validate_domain_list() {
@@ -2890,11 +2959,30 @@ source /etc/os-release
 printf "\033[34;1m%s\033[0m\n" "$(prompt "Model: $MODEL" "Модель: $MODEL")"
 printf "\033[34;1m%s\033[0m\n" "$(prompt "Version: $OPENWRT_RELEASE" "Версия: $OPENWRT_RELEASE")"
 
-VERSION_ID=$(echo $VERSION | awk -F. '{print $1}')
+VERSION_ID=$(echo "$VERSION" | awk -F. '{print $1}')
+ID_LIKE_SAFE=" ${ID:-} ${ID_LIKE:-} ${NAME:-} ${OPENWRT_RELEASE:-} "
 
-if [ "$VERSION_ID" -ne 23 ] && [ "$VERSION_ID" -ne 24 ] && [ "$VERSION_ID" -ne 25 ]; then
-    msgc "$C_RED" "Script supports OpenWrt 23.05, 24.10 and experimental 25.x." "Скрипт поддерживает OpenWrt 23.05, 24.10 и экспериментально 25.x."
-    msg "For older OpenWrt versions use manual configuration." "Для более старых версий OpenWrt используйте ручную настройку."
+# Accept OpenWrt-compatible forks that keep the usual OpenWrt stack: uci/netifd/procd/fw4.
+# 23/24 use opkg on most builds; 25/26 and many X-WRT snapshots use apk.
+case "$VERSION_ID" in
+    23|24|25|26) ;;
+    *)
+        if echo "$ID_LIKE_SAFE" | grep -qiE 'openwrt|x-wrt|xwrt|immortal'; then
+            msgc "$C_YELLOW"                 "Unknown OpenWrt-compatible version ($VERSION). Continuing in experimental mode."                 "Неизвестная OpenWrt-совместимая версия ($VERSION). Продолжаю в экспериментальном режиме."
+        else
+            msgc "$C_RED"                 "Script supports OpenWrt 23.05, 24.10 and experimental 25.x/26.x compatible builds."                 "Скрипт поддерживает OpenWrt 23.05, 24.10 и экспериментально совместимые 25.x/26.x сборки."
+            msg "For older or non-compatible systems use manual configuration." "Для более старых или несовместимых систем используйте ручную настройку."
+            exit 1
+        fi
+    ;;
+esac
+
+if command -v apk >/dev/null 2>&1; then
+    msgc "$C_BLUE" "Package manager: apk" "Пакетный менеджер: apk"
+elif command -v opkg >/dev/null 2>&1; then
+    msgc "$C_BLUE" "Package manager: opkg" "Пакетный менеджер: opkg"
+else
+    msgc "$C_RED" "No supported package manager found: apk/opkg." "Не найден поддерживаемый пакетный менеджер: apk/opkg."
     exit 1
 fi
 
