@@ -1,7 +1,7 @@
 #!/bin/sh
 
 #set -x
-PROJECT_VERSION="v24"
+PROJECT_VERSION="v25"
 
 # Project defaults for dagmagnat/routing-openwrt.
 # Lists are read from GitHub RAW links. By default they are stored in this repository,
@@ -105,11 +105,26 @@ ovpn_detect_dev() {
 
 ovpn_harden_route_only_config() {
     cfg="$1"
-    # Keep OpenVPN from installing its own default route. routing-openwrt will route
+    [ -f "$cfg" ] || return 1
+    # Keep OpenVPN from installing its own default route. routing-openwrt routes
     # only marked traffic through the separate vpn table.
-    grep -qi '^[[:space:]]*route-nopull' "$cfg" 2>/dev/null || echo 'route-nopull' >> "$cfg"
-    grep -qi '^[[:space:]]*pull-filter[[:space:]].*redirect-gateway' "$cfg" 2>/dev/null || echo 'pull-filter ignore "redirect-gateway"' >> "$cfg"
+    sed -i '/# routing-openwrt begin/,/# routing-openwrt end/d' "$cfg" 2>/dev/null || true
+    cat >> "$cfg" <<'CFG'
+
+# routing-openwrt begin
+# Do not let OpenVPN take the whole router internet.
+# routing-openwrt uses fwmark 0x1 + table vpn instead.
+route-nopull
+pull-filter ignore "redirect-gateway"
+pull-filter ignore "redirect-private"
+pull-filter ignore "route 0.0.0.0"
+pull-filter ignore "route 128.0.0.0"
+pull-filter ignore "dhcp-option DNS"
+pull-filter ignore "block-outside-dns"
+# routing-openwrt end
+CFG
 }
+
 
 install_openvpn_packages() {
     msgc "$C_BLUE" "Checking OpenVPN packages" "Проверка пакетов OpenVPN"
@@ -131,19 +146,89 @@ install_openvpn_packages() {
         pkg_install luci-app-openvpn >/dev/null 2>&1 ||             msgc "$C_YELLOW" "luci-app-openvpn was not installed. This is not critical for CLI/paste mode." "luci-app-openvpn не установлен. Это не критично для режима вставки/CLI."
     fi
 
-    if pkg_is_installed kmod-ovpn-dco; then
+    # DCO is optional. Prefer the newer v2 package when it exists in this OpenWrt build;
+    # otherwise try the older kmod-ovpn-dco. Do not fail OpenVPN setup if DCO is unavailable.
+    if pkg_is_installed kmod-ovpn-dco-v2; then
+        msgc "$C_GREEN" "OpenVPN DCO v2 kernel module is already installed" "Модуль OpenVPN DCO v2 уже установлен"
+    elif pkg_is_installed kmod-ovpn-dco; then
         msgc "$C_GREEN" "OpenVPN DCO kernel module is already installed" "Модуль OpenVPN DCO уже установлен"
     else
-        msg "Installing optional kmod-ovpn-dco" "Установка дополнительного kmod-ovpn-dco"
-        if pkg_install kmod-ovpn-dco >/dev/null 2>&1; then
-            msgc "$C_GREEN" "OpenVPN DCO installed" "OpenVPN DCO установлен"
+        msg "Installing optional kmod-ovpn-dco-v2" "Установка дополнительного kmod-ovpn-dco-v2"
+        if pkg_install kmod-ovpn-dco-v2 >/dev/null 2>&1; then
+            msgc "$C_GREEN" "OpenVPN DCO v2 installed" "OpenVPN DCO v2 установлен"
         else
-            msgc "$C_YELLOW" "kmod-ovpn-dco is unavailable or failed to install. OpenVPN will continue in normal userspace mode." "kmod-ovpn-dco недоступен или не установился. OpenVPN продолжит работу в обычном userspace-режиме."
+            msgc "$C_YELLOW" "kmod-ovpn-dco-v2 is unavailable; trying kmod-ovpn-dco" "kmod-ovpn-dco-v2 недоступен; пробую kmod-ovpn-dco"
+            if pkg_install kmod-ovpn-dco >/dev/null 2>&1; then
+                msgc "$C_GREEN" "OpenVPN DCO installed" "OpenVPN DCO установлен"
+            else
+                msgc "$C_YELLOW" "OpenVPN DCO is unavailable or failed to install. OpenVPN will continue in normal userspace mode." "OpenVPN DCO недоступен или не установился. OpenVPN продолжит работу в обычном userspace-режиме."
+            fi
         fi
+    fi
+
+    # Optional helper for certificate work/server configs. Skip silently if already present.
+    if pkg_is_installed openvpn-easy-rsa; then
+        msgc "$C_GREEN" "openvpn-easy-rsa is already installed" "openvpn-easy-rsa уже установлен"
+    else
+        msg "Installing optional openvpn-easy-rsa" "Установка дополнительного openvpn-easy-rsa"
+        pkg_install openvpn-easy-rsa >/dev/null 2>&1 ||             msgc "$C_YELLOW" "openvpn-easy-rsa was not installed. This is not critical for client routing." "openvpn-easy-rsa не установлен. Это не критично для клиентской маршрутизации."
     fi
 
     return 0
 }
+
+ovpn_remove_full_tunnel_routes() {
+    dev="$1"
+    [ -n "$dev" ] || dev="tun0"
+    ip route show 2>/dev/null | grep -E "^(0\.0\.0\.0/1|128\.0\.0\.0/1).* dev ${dev}( |$)" | while IFS= read -r route_line; do
+        ip route del $route_line >/dev/null 2>&1 || true
+    done
+}
+
+ovpn_find_config_for_dev() {
+    dev="$1"
+    tmp="/tmp/routing-openwrt-openvpn-configs"
+    : > "$tmp"
+
+    uci show openvpn 2>/dev/null | sed -n "s/.*\.config='\([^']*\)'.*/\1/p" >> "$tmp"
+    ls /etc/openvpn/*.ovpn /etc/openvpn/*.conf 2>/dev/null >> "$tmp"
+
+    # Prefer a config that explicitly names the selected dev.
+    sort -u "$tmp" | while IFS= read -r cfg; do
+        [ -f "$cfg" ] || continue
+        awk -v dev="$dev" '
+            /^[[:space:]]*#/ || /^[[:space:]]*;/ { next }
+            tolower($1)=="dev" && ($2==dev || ($2=="tun" && dev ~ /^tun/)) { found=1 }
+            END { exit found ? 0 : 1 }
+        ' "$cfg" >/dev/null 2>&1 && { echo "$cfg"; rm -f "$tmp"; exit 0; }
+    done | head -n 1
+
+    # If no exact dev match, use the only available OpenVPN config if there is exactly one.
+    count=$(sort -u "$tmp" | while IFS= read -r cfg; do [ -f "$cfg" ] && echo "$cfg"; done | wc -l)
+    if [ "$count" = "1" ]; then
+        sort -u "$tmp" | while IFS= read -r cfg; do [ -f "$cfg" ] && echo "$cfg"; done | head -n 1
+    fi
+    rm -f "$tmp"
+}
+
+ovpn_prepare_route_only_existing() {
+    dev="$1"
+    [ -n "$dev" ] || dev="tun0"
+    cfg=$(ovpn_find_config_for_dev "$dev")
+    if [ -n "$cfg" ] && [ -f "$cfg" ]; then
+        msg "Patching OpenVPN config for route-only mode: $cfg" "Исправляю OpenVPN-конфиг для точечной маршрутизации: $cfg"
+        ovpn_harden_route_only_config "$cfg"
+    else
+        msgc "$C_YELLOW" "OpenVPN config file was not detected automatically. Full-tunnel routes will be removed at runtime, but it is better to add route-nopull to the .ovpn config." "OpenVPN-конфиг не определён автоматически. Full-tunnel маршруты будут удалены во время работы, но лучше добавить route-nopull в .ovpn конфиг."
+    fi
+
+    # Restart OpenVPN only after config patch. Then remove server-pushed /1 routes if they still appear.
+    /etc/init.d/openvpn enable >/dev/null 2>&1 || true
+    /etc/init.d/openvpn restart >/dev/null 2>&1 || true
+    sleep 8
+    ovpn_remove_full_tunnel_routes "$dev"
+}
+
 
 configure_openvpn_from_paste() {
     msgc "$C_GREEN" "Configure OpenVPN from pasted .ovpn" "Настройка OpenVPN из вставленного .ovpn"
@@ -182,6 +267,8 @@ configure_openvpn_from_paste() {
 
     /etc/init.d/openvpn enable >/dev/null 2>&1 || true
     /etc/init.d/openvpn restart >/dev/null 2>&1 || true
+    sleep 8
+    ovpn_remove_full_tunnel_routes "$OVPN_ROUTE_DEV"
 
     msg "OpenVPN config saved to $OVPN_CFG" "OpenVPN-конфиг сохранён в $OVPN_CFG"
     msg "OpenVPN route device: $OVPN_ROUTE_DEV" "Интерфейс маршрутизации OpenVPN: $OVPN_ROUTE_DEV"
@@ -258,12 +345,11 @@ configure_openvpn_existing() {
             msgc "$C_YELLOW" "Device is in config but not currently up. Routing will be configured, but OpenVPN must be started." "Интерфейс есть в конфиге, но сейчас не поднят. Маршрутизация будет настроена, но OpenVPN нужно запустить."
         fi
 
+        # Manual OpenVPN mode must not create another OpenWrt interface.
+        # If the user already has OpenVPN -> tun0 in LuCI, we only bind routing-openwrt to that tun device.
         uci -q delete network.ovpn0
-    uci -q delete sing-box.main
-        uci set network.ovpn0='interface'
-        uci set network.ovpn0.proto='none'
-        uci set network.ovpn0.device="$OVPN_ROUTE_DEV"
-        uci commit network
+        uci commit network >/dev/null 2>&1 || true
+        ovpn_prepare_route_only_existing "$OVPN_ROUTE_DEV"
         TUNNEL="ovpn"
         route_vpn
         return 0
@@ -842,7 +928,7 @@ route_vpn () {
         VPN_ROUTE_UCI_INTERFACE="awg0"
     elif [ "$TUNNEL" = ovpn ]; then
         VPN_ROUTE_DEV="${OVPN_ROUTE_DEV:-tun0}"
-        VPN_ROUTE_UCI_INTERFACE="ovpn0"
+        VPN_ROUTE_UCI_INTERFACE=""
     elif [ "$TUNNEL" = singbox ]; then
         VPN_ROUTE_DEV="${SINGBOX_ROUTE_DEV:-tun0}"
         VPN_ROUTE_UCI_INTERFACE=""
@@ -904,9 +990,20 @@ fail_open_route() {
     fi
 }
 
+remove_openvpn_full_tunnel_routes() {
+    case "$VPN_ROUTE_DEV" in
+        tun*)
+            ip route show 2>/dev/null | grep -E "^(0\.0\.0\.0/1|128\.0\.0\.0/1).* dev ${VPN_ROUTE_DEV}( |$)" | while IFS= read -r route_line; do
+                ip route del $route_line >/dev/null 2>&1 || true
+            done
+        ;;
+    esac
+}
+
 use_vpn_route() {
     # Always remove the old fail-closed blackhole before installing a working VPN route.
     ip route del blackhole default table "$TABLE" metric 42767 >/dev/null 2>&1 || true
+    remove_openvpn_full_tunnel_routes
     ip route replace default dev "$VPN_ROUTE_DEV" table "$TABLE" scope link metric 10 >/dev/null 2>&1 || return 1
     if [ "$IPV6_SUPPORT" = "1" ]; then
         ip -6 route del blackhole default table "$TABLE" metric 42767 >/dev/null 2>&1 || true
@@ -939,7 +1036,7 @@ EOF
 [ -f /etc/domain-routing-route.conf ] && . /etc/domain-routing-route.conf
 [ -f /etc/domain-routing-user.conf ] && . /etc/domain-routing-user.conf
 
-echo "=== routing-openwrt v24 status ==="
+echo "=== routing-openwrt v25 status ==="
 echo "VPN_ROUTE_DEV=${VPN_ROUTE_DEV:-not set}"
 echo "IPV6_SUPPORT=${IPV6_SUPPORT:-0}"
 echo "DOMAINS_URL=${DOMAINS_URL:-not set}"
@@ -996,6 +1093,15 @@ fi
 # Remove stale fail-closed leftovers from old builds.
 ip route del blackhole default table vpn metric 42767 >/dev/null 2>&1 || true
 ip -6 route del blackhole default table vpn metric 42767 >/dev/null 2>&1 || true
+
+# If OpenVPN is selected, never allow server-pushed full-tunnel /1 routes to remain in main table.
+case "$VPN_ROUTE_DEV" in
+    tun*)
+        ip route show 2>/dev/null | grep -E "^(0\.0\.0\.0/1|128\.0\.0\.0/1).* dev ${VPN_ROUTE_DEV}( |$)" | while IFS= read -r route_line; do
+            ip route del $route_line >/dev/null 2>&1 || true
+        done
+    ;;
+esac
 
 # Make sure only the helper owns the vpn table.
 ip route flush table vpn >/dev/null 2>&1 || true
@@ -1079,36 +1185,48 @@ add_tunnel() {
     clear_screen
     msgc "$C_BLUE" "Select a tunnel" "Выберите туннель"
     if is_ru; then
-        printf "1) %bWireGuard%b                         %b[работает]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
-        printf "2) %bOpenVPN%b                           %b[работает]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
-        printf "3) %bSing-box%b                          %b[экспериментально, VLESS Reality]%b\n" "$C_GREEN" "$C_RESET" "$C_YELLOW" "$C_RESET"
-        printf "4) %bПропустить настройку туннеля%b\n" "$C_RED" "$C_RESET"
-        printf "5) %bДиагностика%b                       %b[проверка]%b\n" "$C_BLUE" "$C_RESET" "$C_BLUE" "$C_RESET"
-        printf "6) %bAmneziaWG / Amnezia WireGuard%b     %b[работает]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "1) %bWireGuard%b                         %b[работает]%b
+" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "2) %bOpenVPN%b                           %b[работает]%b
+" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "3) %bSing-box%b                          %b[экспериментально, VLESS Reality]%b
+" "$C_GREEN" "$C_RESET" "$C_YELLOW" "$C_RESET"
+        printf "4) %bAmneziaWG / Amnezia WireGuard%b     %b[работает]%b
+" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "5) %bОтмена / выход%b
+" "$C_RED" "$C_RESET"
+        printf "6) %bПропустить настройку туннеля%b
+" "$C_YELLOW" "$C_RESET"
         echo
-        echo "Сейчас автоматически настраиваются WireGuard, AmneziaWG, OpenVPN и Sing-box."
+        echo "Диагностика доступна в начальном меню существующей конфигурации и командой: /usr/sbin/routing-openwrt-diagnose.sh"
     else
-        printf "1) %bWireGuard%b                         %b[active]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
-        printf "2) %bOpenVPN%b                           %b[active]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
-        printf "3) %bSing-box%b                          %b[experimental, VLESS Reality]%b\n" "$C_GREEN" "$C_RESET" "$C_YELLOW" "$C_RESET"
-        printf "4) %bSkip tunnel setup%b\n" "$C_RED" "$C_RESET"
-        printf "5) %bDiagnostics%b                       %b[check]%b\n" "$C_BLUE" "$C_RESET" "$C_BLUE" "$C_RESET"
-        printf "6) %bAmneziaWG / Amnezia WireGuard%b     %b[active]%b\n" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "1) %bWireGuard%b                         %b[active]%b
+" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "2) %bOpenVPN%b                           %b[active]%b
+" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "3) %bSing-box%b                          %b[experimental, VLESS Reality]%b
+" "$C_GREEN" "$C_RESET" "$C_YELLOW" "$C_RESET"
+        printf "4) %bAmneziaWG / Amnezia WireGuard%b     %b[active]%b
+" "$C_GREEN" "$C_RESET" "$C_GREEN" "$C_RESET"
+        printf "5) %bCancel / exit%b
+" "$C_RED" "$C_RESET"
+        printf "6) %bSkip tunnel setup%b
+" "$C_YELLOW" "$C_RESET"
         echo
-        echo "Currently WireGuard, AmneziaWG, OpenVPN and Sing-box are configured automatically."
+        echo "Diagnostics are available from the existing-config start menu and by command: /usr/sbin/routing-openwrt-diagnose.sh"
     fi
 
     while true; do
-        printf "%s" "$(prompt "Choice [6]: " "Выбор [6]: ")"
+        printf "%s" "$(prompt "Choice [4]: " "Выбор [4]: ")"
         read -r TUNNEL
-        TUNNEL=${TUNNEL:-6}
+        TUNNEL=${TUNNEL:-4}
         case $TUNNEL in
         1) TUNNEL=wg; break ;;
         2) TUNNEL=ovpn; break ;;
         3) TUNNEL=singbox; break ;;
-        4) msgc "$C_RED" "Skip tunnel setup" "Настройка туннеля пропущена"; TUNNEL=0; break ;;
-        5) run_diagnostics_now; clear_screen; continue ;;
-        6) TUNNEL=awg; break ;;
+        4) TUNNEL=awg; break ;;
+        5) msgc "$C_RED" "Cancelled" "Отменено"; exit 1 ;;
+        6) msgc "$C_YELLOW" "Skip tunnel setup" "Настройка туннеля пропущена"; TUNNEL=0; break ;;
         *) msgc "$C_RED" "Choose 1, 2, 3, 4, 5 or 6." "Выберите 1, 2, 3, 4, 5 или 6." ;;
         esac
     done
@@ -1617,7 +1735,7 @@ section() { printf "\n%b=== %s ===%b\n" "$BLUE" "$1" "$RESET"; }
 [ -f /etc/domain-routing-user.conf ] && . /etc/domain-routing-user.conf
 
 section "routing-openwrt diagnostics"
-echo "Version: v24"
+echo "Version: v25"
 echo "Date: $(date 2>/dev/null)"
 echo "Model: $(ubus call system board 2>/dev/null | jsonfilter -e '@.model' 2>/dev/null || cat /tmp/sysinfo/model 2>/dev/null)"
 echo "OpenWrt: $(ubus call system board 2>/dev/null | jsonfilter -e '@.release.description' 2>/dev/null)"
